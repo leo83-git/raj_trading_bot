@@ -30,9 +30,3 @@ jobs:
 
       - name: Run unit tests
         run: python -m pytest -q
-
-      - name: Run live integration tests (optional)
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_live == 'true' }} || env.RUN_LIVE_TESTS == '1'
-        env:
-          RUN_LIVE_TESTS: ${{ github.event.inputs.run_live }}
-        run: python -m pytest -q tests/test_send_trade_alert_and_integration.py::test_integration_live_option_premiums
