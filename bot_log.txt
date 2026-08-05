@@ -1,0 +1,42 @@
+2026-05-08 14:46:16,495 | sources.nse_enrichment | INFO | NSE Enrichment provider initialized
+2026-05-08 14:46:16,513 | main | INFO | Configuration loaded from /home/rajasekhar/vibe-coding/raj_trading_bot/config/config.yaml
+2026-05-08 14:46:16,513 | main | INFO | Trading mode: PAPER (broker=angelone, paper=True)
+[I 260508 14:46:22 smartConnect:124] in pool
+[E 260508 14:46:22 smartConnect:246] Error occurred while making a POST request to https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword. Error: Invalid Token. URL: https://apiconnect.angelone.in/rest/auth/angelbroking/user/v1/loginByPassword, Headers: {'Content-type': 'application/json', 'X-ClientLocalIP': '127.0.0.1', 'X-ClientPublicIP': '106.193.147.98', 'X-MACAddress': '98:28:a6:27:bc:71', 'Accept': 'application/json', 'X-PrivateKey': None, 'X-UserType': 'USER', 'X-SourceID': 'WEB'}, Request: {'clientcode': None, 'password': None, 'totp': None}, Response: {'success': False, 'message': 'Invalid Token', 'errorCode': 'AG8001', 'data': ''}
+2026-05-08 14:46:22,921 | sources.broker | ERROR | Angel One connection failed: 'status'
+2026-05-08 14:46:22,922 | main | WARNING | angelone broker connection failed, falling back to nselive
+2026-05-08 14:46:35,435 | sources.broker | INFO | NSE Live broker connected (NSEKit MCP primary)
+2026-05-08 14:46:35,436 | sources.data_provider | INFO | Data provider initialized with 1 brokers
+2026-05-08 14:46:35,436 | main | INFO | Data Provider initialized with brokers: ['NSELive']
+2026-05-08 14:46:35,436 | main | INFO | Price cache disabled in config because watchlist is disabled
+2026-05-08 14:46:35,658 | execution.smart | INFO | Broker router initialized with 0 brokers
+2026-05-08 14:46:35,658 | execution.smart | INFO | Execution engine initialized
+2026-05-08 14:46:35,663 | news_awareness | INFO | Event calendar initialized with 30 events
+2026-05-08 14:46:35,664 | sources.nse_enrichment | INFO | NSE Enrichment provider initialized
+2026-05-08 14:46:35,664 | main | INFO | NSE Enrichment provider initialized
+2026-05-08 14:46:35,664 | intelligence.market | INFO | Intelligence engine using real NSE enrichment data
+2026-05-08 14:46:35,664 | screener.engine | INFO | Screener engine initialized
+2026-05-08 14:46:35,664 | fno_prefilter | INFO | Loaded 36 F&O stocks from cache
+2026-05-08 14:46:35,664 | models.ensemble | INFO | Ensemble model initialized with weights: {'ml': 0.4, 'dl': 0.4, 'rl': 0.2}
+2026-05-08 14:46:35,665 | main | INFO | Strategy extraction disabled in config (set strategy_extraction.enabled=true to enable)
+2026-05-08 14:46:35,665 | portfolio.optimizer | INFO | Portfolio optimizer initialized
+2026-05-08 14:46:35,665 | portfolio.optimizer | INFO | Portfolio optimizer initialized
+2026-05-08 14:46:35,665 | risk | INFO | Risk manager initialized
+2026-05-08 14:46:35,665 | execution.smart | INFO | Broker router initialized with 1 brokers
+2026-05-08 14:46:35,665 | execution.smart | INFO | Execution engine initialized
+2026-05-08 14:46:35,666 | feedback.attribution | INFO | Analytics engine initialized
+2026-05-08 14:46:35,666 | simulation.engine | INFO | Simulation engine initialized with capital: 300000
+2026-05-08 14:46:35,666 | main | INFO | Options edge selector initialized
+2026-05-08 14:46:37,886 | backtesting.tradingview | INFO | TradingViewBacktester initialized
+2026-05-08 14:46:37,886 | main | INFO | TradingView backtester initialized
+2026-05-08 14:46:37,886 | main | INFO | All layers initialized
+2026-05-08 14:46:37,886 | main | INFO | Price cache disabled by default; quotes will be fetched on demand
+2026-05-08 14:46:37,886 | main | INFO | Quant Trading System initialized | Mode: PAPER
+2026-05-08 14:46:37,886 | main | INFO | ============================================================
+2026-05-08 14:46:37,886 | main | INFO |   QUANT TRADING SYSTEM STARTED
+2026-05-08 14:46:37,886 | main | INFO |   Mode: PAPER
+2026-05-08 14:46:37,886 | main | INFO | ============================================================
+2026-05-08 14:46:38,647 | main | INFO | Running trading cycle...
+2026-05-08 14:46:38,647 | main | INFO | Running MCP health check...
+2026-05-08 14:46:49,241 | main | INFO | Shutdown signal received, stopping...
+2026-05-08 14:47:00,221 | notifier | ERROR | Telegram send error: HTTPSConnectionPool(host='api.telegram.org', port=443): Max retries exceeded with url: /bot8695428021:AAHGBSYPAEmNRNjtrN4DdjSfKmSWgd_yleQ/sendMessage (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x77d4d7e822a0>, 'Connection to api.telegram.org timed out. (connect timeout=10)'))

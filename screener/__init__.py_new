@@ -1,0 +1,35 @@
+"""
+Screener package initialization file.
+This file initializes the DynamicSymbolScreening with Zerodha credentials from config.yaml.
+"""
+import os
+import yaml
+import time
+from angelone_bot.utils.logger import get_logger
+from angelone_bot.core.zerodha_broker import ZerodhaBroker
+from screener.dynamic_screening import initialize_screening
+
+# Load configuration from config.yaml
+config_path = os.path.join(os.path.dirname(__file__), "../config/config.yaml")
+with open(config_path, 'r') as f:
+    config = yaml.safe_load(f)
+
+# Extract Zerodha credentials
+api_key = config['zerodha_api_key']
+api_secret = config['zerodha_api_secret']
+access_token = config.get('zerodha_access_token', None)
+
+# Create ZerodhaBroker instance with credentials
+broker = ZerodhaBroker(api_key=api_key, api_secret=api_secret, access_token=access_token)
+
+# Wait a moment for authentication to complete if needed
+time.sleep(1)
+
+# Initialize the screening instance using the function from dynamic_screening.py
+screening = initialize_screening(broker)
+
+# Verify that screening was properly initialized
+if screening is None:
+    raise RuntimeError("Failed to initialize screening instance")
+log = get_logger("screener")
+log.info("Screening instance initialized successfully")

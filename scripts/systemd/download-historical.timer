@@ -1,0 +1,12 @@
+[Unit]
+Description=Run download-historical.service after market close
+
+[Timer]
+# 4 PM IST = 10:30 UTC (adjust if your server uses UTC)
+OnCalendar=*-*-* 10:30:00
+Persistent=true
+# Restrict to weekdays
+OnCalendar=Mon..Fri *-*-* 10:30:00
+
+[Install]
+WantedBy=timers.target

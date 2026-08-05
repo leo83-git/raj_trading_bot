@@ -1,0 +1,146 @@
+# Quant Trading System Configuration
+
+broker:
+  type: zerodha  # Primary broker for trading
+
+paper_trade: true  # allow_after_market_paper_trading: false  # After-market trading is now permanently disabled - use daily reporting instead
+
+# Optional brokers (set enabled: true to use)
+angelone_enabled: false  # Set to true to enable Angel One broker
+zerodha_enabled: true  # Set to true to enable Zerodha broker
+
+zerodha_api_key: "yzxs1h7v1q6e02mp"
+zerodha_api_secret: "q5gscgpji7mcegockwypo628esiuclhj"
+
+# Timeout settings
+timeout:
+  quote: 10  # seconds - increased for reliability under load
+  historical: 10
+  option_chain: 8
+  option_chain_pipeline: 8  # hard limit for one F&O chain lookup
+  greeks: 30  # Greeks calculation is compute-intensive
+
+retry:
+  max_attempts: 5  # increased for NSE rate limiting resilience
+  backoff_factor: 2
+
+processing:
+  # Timeout (in seconds) for the overall F&O pipeline execution.
+  # Adjust based on expected data volume and network latency.
+  # Reduced timeout to avoid long‑running F&O tasks that never return.
+  # The per‑stock chain fetch already has a 15 s hard timeout, so a total of
+  # 120 s for the whole batch is sufficient for most realistic workloads.
+  fno_pipeline_timeout: 120
+  # Timeout for intraday pipeline processing per batch (seconds).
+  intraday_pipeline_timeout: 120
+  # F&O Batch Processing Configuration
+  fno_batch_size: 8              # Number of symbols to process per batch
+  fno_max_concurrent: 3          # Maximum number of batches to run concurrently
+  fno_task_timeout_seconds: 120  # Per-symbol timeout within batch processing
+cache:
+  enabled: true
+  ttl_quote: 15  # seconds, increased for reliability
+  ttl_option_chain: 60  # 1 minute
+  ttl_greeks: 30  # 30 seconds
+
+capital:
+  base_capital: 300000
+  max_capital_per_trade: 100000
+  risk_per_trade: 0.02
+
+# Watchlist with trading categories
+# category options: fno (F&O), intraday, scalping, swinging
+# All categories enabled for both indices and stocks
+# Set enabled: false to trade only with screener stocks
+watchlist:
+  enabled: true
+  indices:
+    - symbol: NIFTY
+      category: fno
+    - symbol: NIFTY
+      category: intraday
+    - symbol: BANKNIFTY
+      category: fno
+    - symbol: BANKNIFTY
+      category: intraday
+    - symbol: NIFTY50
+      category: fno
+  stocks:
+    - symbol: RELIANCE
+      category: fno
+    - symbol: RELIANCE
+      category: intraday
+    - symbol: HDFCBANK
+      category: intraday
+    - symbol: HDFCBANK
+      category: fno
+    - symbol: ICICIBANK
+      category: intraday
+    - symbol: ICICIBANK
+      category: fno
+    - symbol: SBIN
+      category: intraday
+    - symbol: SBIN
+      category: fno
+    - symbol: KOTAKBANK
+      category: intraday
+    - symbol: KOTAKBANK
+      category: fno
+    - symbol: AXISBANK
+      category: intraday
+    - symbol: AXISBANK
+      category: fno
+    - symbol: LT
+      category: intraday
+    - symbol: LT
+      category: fno
+    - symbol: HINDUNILVR
+      category: intraday
+    - symbol: MARUTI
+      category: intraday
+    - symbol: SUNPHARMA
+      category: intraday
+    - symbol: TITAN
+      category: intraday
+    - symbol: BAJFINANCE
+      category: intraday
+    - symbol: DIVISLAB
+      category: intraday
+    - symbol: CIPLA
+      category: intraday
+    - symbol: DRREDDY
+      category: intraday
+
+# Thresholds for strategy confidence and other parameters
+thresholds:
+  # Minimum confidence required for a signal to be considered actionable.
+  # Recommended range for intraday strategies is 0.05‑0.20.
+  min_confidence: 0.08
+
+# -------------------------------------------------
+# Intraday screening thresholds
+# Recommended ranges:
+#   min_screener_score: 0.01 – 0.20   (higher values make screening stricter)
+#   min_volume:          1,000 – 5,000 (adjust based on market liquidity)
+#   min_price:           1 – 20      (₹) – lower bound for penny‑stock exclusion
+intraday:
+  # Minimum screener/ML score a candidate must achieve to be considered.
+  min_screener_score: 0.01
+  # Minimum traded volume (shares) for the candidate.
+  min_volume: 2000
+  # Minimum last price (₹) for the candidate.
+  min_price: 5
+
+# -------------------------------------------------
+# F&O (Futures & Options) screening thresholds
+# Recommended ranges:
+#   min_screener_score: 0.00 – 0.15
+#   min_volume:          5,000 – 20,000
+#   min_price:           10 – 100
+fno:
+  # Minimum screener/ML score for F&O candidates.
+  min_screener_score: 0.0
+  # Minimum traded volume for non‑index F&O symbols.
+  min_volume: 10000
+  # Minimum last price (₹) for non‑index F&O symbols.
+  min_price: 10

@@ -1,0 +1,42 @@
+- !!python/tuple
+  - rsi
+  - 0.22127778828144073
+- !!python/tuple
+  - volatility
+  - 0.21470977365970612
+- !!python/tuple
+  - ema_21
+  - 0.11170702427625656
+- !!python/tuple
+  - ema_9
+  - 0.10170554369688034
+- !!python/tuple
+  - sma_21
+  - 0.0969046875834465
+- !!python/tuple
+  - atr
+  - 0.09161671996116638
+- !!python/tuple
+  - macd
+  - 0.08338707685470581
+- !!python/tuple
+  - sma_9
+  - 0.07869141548871994
+- !!python/tuple
+  - macd_signal
+  - 0.0
+- !!python/tuple
+  - macd_histogram
+  - 0.0
+- !!python/tuple
+  - sma_50
+  - 0.0
+- !!python/tuple
+  - bb_upper
+  - 0.0
+- !!python/tuple
+  - bb_middle
+  - 0.0
+- !!python/tuple
+  - bb_lower
+  - 0.0

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push: {}
+  pull_request: {}
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: 'Run live integration tests (set to "true" to enable)'
+        required: false
+        default: 'false'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: [3.10, 3.11, 3.12]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run unit tests
+        run: python -m pytest -q
+
+      - name: Run live integration tests (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_live == 'true' }} || env.RUN_LIVE_TESTS == '1'
+        env:
+          RUN_LIVE_TESTS: ${{ github.event.inputs.run_live }}
+        run: python -m pytest -q tests/test_send_trade_alert_and_integration.py::test_integration_live_option_premiums

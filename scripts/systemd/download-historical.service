@@ -1,0 +1,7 @@
+[Unit]
+Description=Download daily historical candle data
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/rajasekhar/vibe-coding/raj_trading_bot/scripts/download_historical_daily.py
