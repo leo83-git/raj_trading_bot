@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+from sqlalchemy import create_engine, inspect
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "scripts" / "download_market_snapshot.py"
@@ -98,3 +100,40 @@ def test_collect_chunk_falls_back_to_rest_quotes_when_websocket_cache_is_empty(m
     assert len(rows) == 1
     assert rows[0]["instrument_token"] == 12345
     assert rows[0]["last_price"] == 123.45
+
+
+def test_ensure_table_uses_canonical_snapshot_columns(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'snapshot.db'}", future=True)
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE market_snapshot (
+                instrument_token INTEGER PRIMARY KEY,
+                symbol TEXT,
+                exchange TEXT,
+                last_price TEXT,
+                quote_json TEXT,
+                depth_json TEXT,
+                timestamp TEXT
+            )
+            """
+        )
+        conn.exec_driver_sql(
+            """
+            INSERT INTO market_snapshot VALUES (
+                1, 'TEST', 'NSE', '123.45', '{"last_price":123.45}', '{"buy":[{"price":123}],"sell":[{"price":124}]}', '2026-08-06T09:15:00'
+            )
+            """
+        )
+    table = module.ensure_table(engine)
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("market_snapshot")}
+
+    assert {"instrument_token", "symbol", "exchange", "last_price", "bids_json", "asks_json", "timestamp"}.issubset(columns)
+    assert "quote_json" not in columns
+    assert "depth_json" not in columns
+    with engine.begin() as conn:
+        rows = list(conn.execute(table.select()))
+    assert rows[0].last_price == 123.45
+    assert rows[0].bids_json == '[{"price": 123}]'
+    assert rows[0].asks_json == '[{"price": 124}]'

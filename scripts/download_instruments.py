@@ -29,9 +29,11 @@ from sqlalchemy import (
     create_engine,
     text,
 )
+from utils.dataset_manifests import DatasetManifest, summarize_rows, write_manifest
 
 
 INSTRUMENTS_URL = "https://api.kite.trade/instruments"
+MANIFEST_DIR = Path(__file__).resolve().parents[1] / "data" / "manifests"
 
 
 def load_environment() -> None:
@@ -159,6 +161,26 @@ def main() -> int:
     table = ensure_table(engine)
     rows = fetch_instruments_csv(args.url)
     count = store_instruments(engine, table, rows)
+    manifest = DatasetManifest(
+        dataset="instrument_cache",
+        source=args.url,
+        status="completed",
+        summary=summarize_rows(
+            [
+                {
+                    "symbol": row.get("tradingsymbol"),
+                    "ts": row.get("expiry"),
+                    "open": None,
+                    "high": None,
+                    "low": None,
+                    "close": None,
+                    "volume": None,
+                }
+                for row in rows
+            ]
+        ),
+    )
+    write_manifest(MANIFEST_DIR / "instrument_cache.manifest.json", manifest)
 
     if args.output_json:
         Path(args.output_json).write_text(

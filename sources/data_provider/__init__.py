@@ -13,8 +13,10 @@ import aiohttp
 
 from quant_utils.logger import get_logger
 from utils.cache import (
+    get_cached_fno_contracts,
     get_cached_option_chain,
     get_cached_quote,
+    set_cached_fno_contracts,
     set_cached_option_chain,
     set_cached_quote,
 )
@@ -22,6 +24,33 @@ from utils.cache import (
 from ..indian_stock_api import NSEIndiaData
 
 log = get_logger("sources.data_provider")
+
+
+class CircuitBreaker:
+    """Small failure gate for noisy fallback providers."""
+
+    def __init__(self, max_failures: int = 3, reset_after_seconds: float = 60.0) -> None:
+        self.max_failures = max_failures
+        self.reset_after_seconds = reset_after_seconds
+        self.failures = 0
+        self.last_failure_time = 0.0
+        self._lock = threading.Lock()
+
+    def allow(self) -> bool:
+        with self._lock:
+            if self.failures < self.max_failures:
+                return True
+            return (time.time() - self.last_failure_time) >= self.reset_after_seconds
+
+    def record_success(self) -> None:
+        with self._lock:
+            self.failures = 0
+            self.last_failure_time = 0.0
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self.failures += 1
+            self.last_failure_time = time.time()
 
 
 class DataProvider:
@@ -52,6 +81,7 @@ class DataProvider:
         self.symbols_cache = {}
         self.instrument_master_cache = {"data": [], "fetched_date": None}
         self.fallback_api = NSEIndiaData()
+        self._fallback_breaker = CircuitBreaker(max_failures=3, reset_after_seconds=60.0)
         # VIX cache to prevent repeated rate-limited requests
         self._vix_cache = None
         self._vix_cache_time = None
@@ -254,6 +284,9 @@ class DataProvider:
                         "exchange": exchange,
                         **quote_dict,
                         "timestamp": datetime.now(),
+                        "source": getattr(broker, "name", "broker"),
+                        "provenance": "broker",
+                        "freshness_seconds": 0.0,
                     }
 
                     self.cache[cache_key] = {
@@ -328,6 +361,9 @@ class DataProvider:
 
         # Fallback to Indian stock API + yfinance if broker quotes fail
         try:
+            if not self._fallback_breaker.allow():
+                log.debug(f"Fallback breaker open for {symbol}; returning cached/no data")
+                return None
             log.warning(f"All brokers failed for {symbol}, trying fallback API")
             fallback = self.fallback_api.get_quote(symbol)
             if fallback:
@@ -339,12 +375,18 @@ class DataProvider:
                     "bid": fallback.get("bid", 0),
                     "ask": fallback.get("ask", 0),
                     "timestamp": datetime.now(),
+                    "source": "fallback_api",
+                    "provenance": "nseindia+yfinance",
+                    "freshness_seconds": 0.0,
                 }
                 self.cache[cache_key] = {"data": data_obj, "timestamp": datetime.now()}
                 set_cached_quote(cache_key, data_obj)
+                self._fallback_breaker.record_success()
                 return data_obj
+            self._fallback_breaker.record_failure()
         except Exception as e:
             log.debug(f"Fallback quote fetch failed for {symbol}: {e}")
+            self._fallback_breaker.record_failure()
 
         return None
 

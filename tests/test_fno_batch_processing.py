@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -230,3 +232,85 @@ def test_fno_contract_loader_deduplicates_by_symbol():
     assert deduped[0]["symbol"] == "BANKNIFTY26AUGFUT"
     assert deduped[0]["instrument_token"] == "2002"
     assert deduped[1]["symbol"] == "NIFTY26AUGFUT"
+
+
+def test_fno_contract_loader_init_does_not_force_sync_refresh(monkeypatch):
+    """Loader init should rely on cached data and background refresh only."""
+
+    from screener import fno_contract_loader as module
+    from utils import cache as cache_module
+
+    class FakeDB:
+        def load_fno_contract_cache(self):
+            return [], None
+
+    cache_module.clear_caches()
+    monkeypatch.setattr(module, "DatabaseManager", lambda: FakeDB())
+    monkeypatch.setattr(module.FnoContractLoader, "_start_background_refresh", lambda self: None)
+    called = {"sync": 0}
+
+    def fake_refresh(self):
+        called["sync"] += 1
+
+    monkeypatch.setattr(module.FnoContractLoader, "_refresh_contracts_sync", fake_refresh)
+
+    loader = module.FnoContractLoader()
+
+    assert called["sync"] == 0
+    assert loader.contracts == []
+
+
+def test_fno_contract_loader_refresh_async_starts_only_one_worker(monkeypatch):
+    """Concurrent refresh requests should not spawn multiple background workers."""
+
+    from screener import fno_contract_loader as module
+
+    created_threads = []
+    caller_barrier = threading.Barrier(2)
+    worker_release = threading.Event()
+    real_thread = threading.Thread
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+            self.daemon = daemon
+            self.started = False
+            created_threads.append(self)
+
+        def is_alive(self):
+            return self.started
+
+        def start(self):
+            self.started = True
+            worker_release.wait(timeout=1)
+
+    loader = module.FnoContractLoader.__new__(module.FnoContractLoader)
+    loader._background_thread = None
+    loader._lifecycle_lock = threading.Lock()
+    loader._refresh_lock = threading.Lock()
+    loader.contracts = []
+    loader.last_refresh = None
+
+    monkeypatch.setattr(module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(loader, "_refresh_contracts_async", lambda: None)
+
+    def call_refresh():
+        caller_barrier.wait(timeout=1)
+        loader.refresh_async()
+
+    first = real_thread(target=call_refresh)
+    second = real_thread(target=call_refresh)
+    first.start()
+    second.start()
+
+    deadline = time.time() + 1
+    while not created_threads and time.time() < deadline:
+        time.sleep(0.01)
+
+    worker_release.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert len(created_threads) == 1
+    assert loader._background_thread is created_threads[0]
+    assert loader._background_thread.started is True

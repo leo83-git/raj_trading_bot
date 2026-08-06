@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, create_engine, inspect, text
+from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, create_engine, inspect, text
 
 try:
     from kiteconnect import KiteConnect
@@ -27,6 +27,7 @@ if str(ROOT_DIR) not in sys.path:
 from core.database import DatabaseManager
 from core.zerodha_websocket import ZerodhaWebSocket
 from core.token_manager import ZerodhaTokenManager
+from utils.dataset_manifests import DatasetManifest, load_manifest, manifest_path_for, summarize_rows, write_manifest
 
 MAX_TOKENS_PER_CONNECTION = 2500
 MAX_SIMULTANEOUS_CONNECTIONS = 3
@@ -113,27 +114,87 @@ def ensure_table(engine):
         Column("instrument_token", Integer, primary_key=True),
         Column("symbol", String(64)),
         Column("exchange", String(16)),
-        Column("last_price", String(32)),
-        Column("quote_json", Text),
-        Column("depth_json", Text),
-        Column("timestamp", String(64)),
+        Column("last_price", Float),
+        Column("bids_json", Text),
+        Column("asks_json", Text),
+        Column("timestamp", DateTime),
     )
     metadata.create_all(engine, tables=[snapshot])
 
-    inspector = inspect(engine)
-    existing_columns = {column["name"] for column in inspector.get_columns("market_snapshot")}
-    if "quote_json" not in existing_columns:
+    def _refresh_columns() -> set[str]:
+        return {
+            column["name"]
+            for column in inspect(engine).get_columns("market_snapshot")
+        }
+
+    existing_columns = _refresh_columns()
+    dialect = engine.dialect.name
+    if dialect == "sqlite" and (
+        "quote_json" in existing_columns or "depth_json" in existing_columns
+    ):
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN quote_json TEXT"))
-    if "depth_json" not in existing_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN depth_json TEXT"))
+            legacy_rows = list(
+                conn.execute(
+                    text(
+                        """
+                        SELECT instrument_token, symbol, exchange, last_price, quote_json, depth_json, timestamp
+                        FROM market_snapshot
+                        """
+                    )
+                )
+            )
+            conn.execute(text("DROP TABLE market_snapshot"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE market_snapshot (
+                        instrument_token INTEGER PRIMARY KEY,
+                        symbol VARCHAR(64),
+                        exchange VARCHAR(16),
+                        last_price FLOAT,
+                        bids_json TEXT,
+                        asks_json TEXT,
+                        timestamp DATETIME
+                    )
+                    """
+                )
+            )
+            for row in legacy_rows:
+                depth_payload = {}
+                if row[5]:
+                    try:
+                        depth_payload = json.loads(row[5])
+                    except Exception:
+                        depth_payload = {}
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO market_snapshot (
+                            instrument_token, symbol, exchange, last_price, bids_json, asks_json, timestamp
+                        ) VALUES (
+                            :instrument_token, :symbol, :exchange, :last_price, :bids_json, :asks_json, :timestamp
+                        )
+                        """
+                        ),
+                        {
+                            "instrument_token": row[0],
+                            "symbol": row[1],
+                            "exchange": row[2],
+                            "last_price": float(row[3]) if row[3] is not None else None,
+                            "bids_json": json.dumps(depth_payload.get("buy") or [], default=str),
+                            "asks_json": json.dumps(depth_payload.get("sell") or [], default=str),
+                            "timestamp": row[6],
+                        },
+                    )
+        existing_columns = _refresh_columns()
     if "bids_json" not in existing_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN bids_json TEXT"))
+        existing_columns = _refresh_columns()
     if "asks_json" not in existing_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN asks_json TEXT"))
+        existing_columns = _refresh_columns()
     return snapshot
 
 
@@ -315,16 +376,16 @@ def fetch_rest_rows(token_meta: dict[int, dict], api_key: str, access_token: str
             if not entry.get("last_price") and not entry.get("close"):
                 continue
             rows.append(
-                {
-                    "instrument_token": token,
-                    "symbol": meta.get("tradingsymbol"),
-                    "exchange": meta.get("exchange"),
-                    "last_price": entry.get("last_price") or entry.get("close"),
-                    "quote_json": json.dumps(entry, default=str),
-                    "depth_json": json.dumps(entry.get("depth") or {}, default=str),
-                    "timestamp": datetime.now(UTC).isoformat(),
-                }
-            )
+                    {
+                        "instrument_token": token,
+                        "symbol": meta.get("tradingsymbol"),
+                        "exchange": meta.get("exchange"),
+                        "last_price": entry.get("last_price") or entry.get("close"),
+                        "bids_json": json.dumps((entry.get("depth") or {}).get("buy") or [], default=str),
+                        "asks_json": json.dumps((entry.get("depth") or {}).get("sell") or [], default=str),
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    }
+                )
     return rows
 
 
@@ -366,8 +427,8 @@ def collect_chunk(
                         "symbol": meta.get("tradingsymbol"),
                         "exchange": meta.get("exchange"),
                         "last_price": entry.get("close"),
-                        "quote_json": json.dumps(entry, default=str),
-                        "depth_json": json.dumps(depth, default=str),
+                        "bids_json": json.dumps(depth.get("buy") or [], default=str),
+                        "asks_json": json.dumps(depth.get("sell") or [], default=str),
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
@@ -396,28 +457,6 @@ def store_snapshot(engine, table, rows: list[dict]) -> int:
     inspector = inspect(engine)
     existing_columns = {column["name"] for column in inspector.get_columns("market_snapshot")}
 
-    if {"quote_json", "depth_json"}.issubset(existing_columns):
-        upsert_sql = text(
-            """
-            INSERT INTO market_snapshot (
-                instrument_token, symbol, exchange, last_price, quote_json, depth_json, timestamp
-            ) VALUES (
-                :instrument_token, :symbol, :exchange, :last_price, :quote_json, :depth_json, :timestamp
-            )
-            ON CONFLICT (instrument_token) DO UPDATE SET
-                symbol = EXCLUDED.symbol,
-                exchange = EXCLUDED.exchange,
-                last_price = EXCLUDED.last_price,
-                quote_json = EXCLUDED.quote_json,
-                depth_json = EXCLUDED.depth_json,
-                timestamp = EXCLUDED.timestamp
-            """
-        )
-        with engine.begin() as conn:
-            for row in rows:
-                conn.execute(upsert_sql, row)
-        return len(rows)
-
     if {"bids_json", "asks_json"}.issubset(existing_columns):
         upsert_sql = text(
             """
@@ -438,17 +477,14 @@ def store_snapshot(engine, table, rows: list[dict]) -> int:
         with engine.begin() as conn:
             for row in rows:
                 payload = dict(row)
-                depth = {}
-                try:
-                    depth = json.loads(payload.get("depth_json") or "{}") if payload.get("depth_json") else {}
-                except Exception:
-                    depth = {}
-                payload["bids_json"] = json.dumps(depth.get("buy") or [], default=str)
-                payload["asks_json"] = json.dumps(depth.get("sell") or [], default=str)
+                payload.setdefault("bids_json", json.dumps([], default=str))
+                payload.setdefault("asks_json", json.dumps([], default=str))
                 conn.execute(upsert_sql, payload)
         return len(rows)
 
-    raise RuntimeError("market_snapshot table does not contain a supported schema for snapshot storage")
+    raise RuntimeError(
+        "market_snapshot table does not contain a supported schema for snapshot storage"
+    )
 
 
 def main() -> int:
