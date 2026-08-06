@@ -22,7 +22,7 @@ def test_manifest_round_trip(tmp_path: Path):
     assert loaded["dataset"] == "historical_candles"
     assert loaded["status"] == "completed"
     assert loaded["summary"]["rows"] == 2
-    assert loaded["updated_at"]
+    assert loaded["updated_at"] == manifest.updated_at
 
 
 def test_manifest_default_updated_at_is_populated():

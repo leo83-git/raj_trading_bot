@@ -13,8 +13,10 @@ spec.loader.exec_module(module)
 
 def test_manifest_path_is_fixed_and_local():
     manifest_path = module.MANIFEST_DIR / "instrument_cache.manifest.json"
+    resolved_root = ROOT.resolve()
+    resolved_manifest = manifest_path.resolve()
 
     assert manifest_path.is_absolute()
-    assert str(manifest_path).startswith(str(ROOT))
+    assert resolved_root in resolved_manifest.parents
     assert "://" not in str(manifest_path)
     assert manifest_path.name == "instrument_cache.manifest.json"

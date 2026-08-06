@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -264,6 +266,9 @@ def test_fno_contract_loader_refresh_async_starts_only_one_worker(monkeypatch):
     from screener import fno_contract_loader as module
 
     created_threads = []
+    caller_barrier = threading.Barrier(2)
+    worker_release = threading.Event()
+    real_thread = threading.Thread
 
     class FakeThread:
         def __init__(self, target=None, daemon=None):
@@ -277,19 +282,34 @@ def test_fno_contract_loader_refresh_async_starts_only_one_worker(monkeypatch):
 
         def start(self):
             self.started = True
+            worker_release.wait(timeout=1)
 
     loader = module.FnoContractLoader.__new__(module.FnoContractLoader)
     loader._background_thread = None
-    loader._lifecycle_lock = module.threading.Lock()
-    loader._refresh_lock = module.threading.Lock()
+    loader._lifecycle_lock = threading.Lock()
+    loader._refresh_lock = threading.Lock()
     loader.contracts = []
     loader.last_refresh = None
 
     monkeypatch.setattr(module.threading, "Thread", FakeThread)
     monkeypatch.setattr(loader, "_refresh_contracts_async", lambda: None)
 
-    loader.refresh_async()
-    loader.refresh_async()
+    def call_refresh():
+        caller_barrier.wait(timeout=1)
+        loader.refresh_async()
+
+    first = real_thread(target=call_refresh)
+    second = real_thread(target=call_refresh)
+    first.start()
+    second.start()
+
+    deadline = time.time() + 1
+    while not created_threads and time.time() < deadline:
+        time.sleep(0.01)
+
+    worker_release.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
 
     assert len(created_threads) == 1
     assert loader._background_thread is created_threads[0]

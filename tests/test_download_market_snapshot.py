@@ -135,3 +135,5 @@ def test_ensure_table_uses_canonical_snapshot_columns(tmp_path):
     with engine.begin() as conn:
         rows = list(conn.execute(table.select()))
     assert rows[0].last_price == 123.45
+    assert rows[0].bids_json == '[{"price": 123}]'
+    assert rows[0].asks_json == '[{"price": 124}]'

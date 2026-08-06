@@ -130,10 +130,7 @@ def ensure_table(engine):
     existing_columns = _refresh_columns()
     dialect = engine.dialect.name
     if dialect == "sqlite" and (
-        "quote_json" in existing_columns
-        or "depth_json" in existing_columns
-        or "last_price" in existing_columns
-        or "timestamp" in existing_columns
+        "quote_json" in existing_columns or "depth_json" in existing_columns
     ):
         with engine.begin() as conn:
             legacy_rows = list(
@@ -184,7 +181,7 @@ def ensure_table(engine):
                             "symbol": row[1],
                             "exchange": row[2],
                             "last_price": float(row[3]) if row[3] is not None else None,
-                            "bids_json": row[4] or json.dumps(depth_payload.get("buy") or [], default=str),
+                            "bids_json": json.dumps(depth_payload.get("buy") or [], default=str),
                             "asks_json": json.dumps(depth_payload.get("sell") or [], default=str),
                             "timestamp": row[6],
                         },
