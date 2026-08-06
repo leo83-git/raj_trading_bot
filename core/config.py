@@ -181,7 +181,7 @@ LOG_LEVEL = "INFO"
 # If not set, falls back to CSV logging
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5433")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "angelone_trading")
+POSTGRES_DB = os.environ.get("POSTGRES_DB", "trading_bot")
 POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
 

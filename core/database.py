@@ -137,7 +137,7 @@ class DatabaseManager:
         try:
             return create_engine(database_url, echo=echo, pool_pre_ping=True)
         except Exception:
-            fallback_url = os.getenv("SQLITE_FALLBACK_URL", "sqlite:///data/trading_bot.db")
+            fallback_url = os.getenv("SQLITE_FALLBACK_URL", "sqlite:///:memory:")
             os.makedirs("data", exist_ok=True)
             return create_engine(fallback_url, echo=echo, future=True)
 
