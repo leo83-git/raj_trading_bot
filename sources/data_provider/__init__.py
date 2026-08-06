@@ -34,19 +34,23 @@ class CircuitBreaker:
         self.reset_after_seconds = reset_after_seconds
         self.failures = 0
         self.last_failure_time = 0.0
+        self._lock = threading.Lock()
 
     def allow(self) -> bool:
-        if self.failures < self.max_failures:
-            return True
-        return (time.time() - self.last_failure_time) >= self.reset_after_seconds
+        with self._lock:
+            if self.failures < self.max_failures:
+                return True
+            return (time.time() - self.last_failure_time) >= self.reset_after_seconds
 
     def record_success(self) -> None:
-        self.failures = 0
-        self.last_failure_time = 0.0
+        with self._lock:
+            self.failures = 0
+            self.last_failure_time = 0.0
 
     def record_failure(self) -> None:
-        self.failures += 1
-        self.last_failure_time = time.time()
+        with self._lock:
+            self.failures += 1
+            self.last_failure_time = time.time()
 
 
 class DataProvider:
@@ -379,6 +383,7 @@ class DataProvider:
                 set_cached_quote(cache_key, data_obj)
                 self._fallback_breaker.record_success()
                 return data_obj
+            self._fallback_breaker.record_failure()
         except Exception as e:
             log.debug(f"Fallback quote fetch failed for {symbol}: {e}")
             self._fallback_breaker.record_failure()

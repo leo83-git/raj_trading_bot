@@ -29,10 +29,11 @@ from sqlalchemy import (
     create_engine,
     text,
 )
-from utils.dataset_manifests import DatasetManifest, load_manifest, manifest_path_for, summarize_rows, write_manifest
+from utils.dataset_manifests import DatasetManifest, summarize_rows, write_manifest
 
 
 INSTRUMENTS_URL = "https://api.kite.trade/instruments"
+MANIFEST_DIR = Path(__file__).resolve().parents[1] / "data" / "manifests"
 
 
 def load_environment() -> None:
@@ -179,7 +180,7 @@ def main() -> int:
             ]
         ),
     )
-    write_manifest(manifest_path_for(Path(database_url.split("///")[-1]).with_suffix(".manifest")), manifest)
+    write_manifest(MANIFEST_DIR / "instrument_cache.manifest.json", manifest)
 
     if args.output_json:
         Path(args.output_json).write_text(

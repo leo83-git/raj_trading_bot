@@ -256,3 +256,41 @@ def test_fno_contract_loader_init_does_not_force_sync_refresh(monkeypatch):
 
     assert called["sync"] == 0
     assert loader.contracts == []
+
+
+def test_fno_contract_loader_refresh_async_starts_only_one_worker(monkeypatch):
+    """Concurrent refresh requests should not spawn multiple background workers."""
+
+    from screener import fno_contract_loader as module
+
+    created_threads = []
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None):
+            self.target = target
+            self.daemon = daemon
+            self.started = False
+            created_threads.append(self)
+
+        def is_alive(self):
+            return self.started
+
+        def start(self):
+            self.started = True
+
+    loader = module.FnoContractLoader.__new__(module.FnoContractLoader)
+    loader._background_thread = None
+    loader._lifecycle_lock = module.threading.Lock()
+    loader._refresh_lock = module.threading.Lock()
+    loader.contracts = []
+    loader.last_refresh = None
+
+    monkeypatch.setattr(module.threading, "Thread", FakeThread)
+    monkeypatch.setattr(loader, "_refresh_contracts_async", lambda: None)
+
+    loader.refresh_async()
+    loader.refresh_async()
+
+    assert len(created_threads) == 1
+    assert loader._background_thread is created_threads[0]
+    assert loader._background_thread.started is True

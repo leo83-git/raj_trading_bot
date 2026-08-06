@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass, asdict
+from collections import defaultdict
+from dataclasses import dataclass, asdict, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -96,7 +97,7 @@ def summarize_rows(
         "last_ts": None,
     }
     seen: set[tuple[Any, Any]] = set()
-    timestamps: list[datetime] = []
+    timestamps_by_symbol: dict[str, list[datetime]] = defaultdict(list)
     for row in rows:
         sym = row.get(symbol_key)
         ts = row.get(timestamp_key)
@@ -111,7 +112,7 @@ def summarize_rows(
             except Exception:
                 continue
         if isinstance(ts, datetime):
-            timestamps.append(ts)
+            timestamps_by_symbol[str(sym)].append(ts)
             if summary["first_ts"] is None or ts < summary["first_ts"]:
                 summary["first_ts"] = ts
             if summary["last_ts"] is None or ts > summary["last_ts"]:
@@ -138,11 +139,14 @@ def summarize_rows(
         if volume_v is not None and float(volume_v) < 0:
             summary["ohlc_issues"] += 1
 
-    if expected_step and len(timestamps) > 1:
-        timestamps = sorted(set(timestamps))
-        for previous, current in zip(timestamps, timestamps[1:]):
-            if current - previous > expected_step * 2:
-                summary["gap_count"] += 1
+    if expected_step:
+        for timestamps in timestamps_by_symbol.values():
+            if len(timestamps) <= 1:
+                continue
+            ordered = sorted(set(timestamps))
+            for previous, current in zip(ordered, ordered[1:]):
+                if current - previous > expected_step * 2:
+                    summary["gap_count"] += 1
 
     return summary
 
@@ -151,7 +155,7 @@ def summarize_rows(
 class DatasetManifest:
     dataset: str
     schema_version: int = DEFAULT_SCHEMA_VERSION
-    updated_at: str = ""
+    updated_at: str = field(default_factory=utc_now_iso)
     source: str = ""
     status: str = "unknown"
     summary: dict[str, Any] | None = None

@@ -121,20 +121,83 @@ def ensure_table(engine):
     )
     metadata.create_all(engine, tables=[snapshot])
 
-    inspector = inspect(engine)
-    existing_columns = {column["name"] for column in inspector.get_columns("market_snapshot")}
+    def _refresh_columns() -> set[str]:
+        return {
+            column["name"]
+            for column in inspect(engine).get_columns("market_snapshot")
+        }
+
+    existing_columns = _refresh_columns()
+    dialect = engine.dialect.name
+    if dialect == "sqlite" and (
+        "quote_json" in existing_columns
+        or "depth_json" in existing_columns
+        or "last_price" in existing_columns
+        or "timestamp" in existing_columns
+    ):
+        with engine.begin() as conn:
+            legacy_rows = list(
+                conn.execute(
+                    text(
+                        """
+                        SELECT instrument_token, symbol, exchange, last_price, quote_json, depth_json, timestamp
+                        FROM market_snapshot
+                        """
+                    )
+                )
+            )
+            conn.execute(text("DROP TABLE market_snapshot"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE market_snapshot (
+                        instrument_token INTEGER PRIMARY KEY,
+                        symbol VARCHAR(64),
+                        exchange VARCHAR(16),
+                        last_price FLOAT,
+                        bids_json TEXT,
+                        asks_json TEXT,
+                        timestamp DATETIME
+                    )
+                    """
+                )
+            )
+            for row in legacy_rows:
+                depth_payload = {}
+                if row[5]:
+                    try:
+                        depth_payload = json.loads(row[5])
+                    except Exception:
+                        depth_payload = {}
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO market_snapshot (
+                            instrument_token, symbol, exchange, last_price, bids_json, asks_json, timestamp
+                        ) VALUES (
+                            :instrument_token, :symbol, :exchange, :last_price, :bids_json, :asks_json, :timestamp
+                        )
+                        """
+                        ),
+                        {
+                            "instrument_token": row[0],
+                            "symbol": row[1],
+                            "exchange": row[2],
+                            "last_price": float(row[3]) if row[3] is not None else None,
+                            "bids_json": row[4] or json.dumps(depth_payload.get("buy") or [], default=str),
+                            "asks_json": json.dumps(depth_payload.get("sell") or [], default=str),
+                            "timestamp": row[6],
+                        },
+                    )
+        existing_columns = _refresh_columns()
     if "bids_json" not in existing_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN bids_json TEXT"))
+        existing_columns = _refresh_columns()
     if "asks_json" not in existing_columns:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN asks_json TEXT"))
-    if "quote_json" in existing_columns and "bids_json" not in existing_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN bids_json TEXT"))
-    if "depth_json" in existing_columns and "asks_json" not in existing_columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE market_snapshot ADD COLUMN asks_json TEXT"))
+        existing_columns = _refresh_columns()
     return snapshot
 
 

@@ -22,6 +22,13 @@ def test_manifest_round_trip(tmp_path: Path):
     assert loaded["dataset"] == "historical_candles"
     assert loaded["status"] == "completed"
     assert loaded["summary"]["rows"] == 2
+    assert loaded["updated_at"]
+
+
+def test_manifest_default_updated_at_is_populated():
+    manifest = DatasetManifest(dataset="historical_candles")
+
+    assert manifest.updated_at
 
 
 def test_summarize_rows_detects_duplicates_gaps_and_ohlc_issues():
@@ -38,3 +45,29 @@ def test_summarize_rows_detects_duplicates_gaps_and_ohlc_issues():
     assert summary["gap_count"] >= 1
     assert summary["ohlc_issues"] >= 1
 
+
+def test_summarize_rows_counts_gaps_per_symbol():
+    rows = [
+        {"symbol": "AAA", "ts": datetime(2026, 8, 6, 9, 15), "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1},
+        {"symbol": "AAA", "ts": datetime(2026, 8, 6, 9, 30), "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1},
+        {"symbol": "BBB", "ts": datetime(2026, 8, 6, 9, 15), "open": 20, "high": 21, "low": 19, "close": 20.5, "volume": 1},
+        {"symbol": "BBB", "ts": datetime(2026, 8, 6, 9, 20), "open": 20, "high": 21, "low": 19, "close": 20.5, "volume": 1},
+    ]
+
+    summary = summarize_rows(rows, expected_step=timedelta(minutes=5))
+
+    assert summary["gap_count"] == 1
+
+
+def test_summarize_rows_counts_gaps_across_symbols_with_different_intervals():
+    rows = [
+        {"symbol": "AAA", "ts": datetime(2026, 8, 6, 9, 15), "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1},
+        {"symbol": "AAA", "ts": datetime(2026, 8, 6, 9, 30), "open": 10, "high": 11, "low": 9, "close": 10.5, "volume": 1},
+        {"symbol": "BBB", "ts": datetime(2026, 8, 6, 9, 15), "open": 20, "high": 21, "low": 19, "close": 20.5, "volume": 1},
+        {"symbol": "BBB", "ts": datetime(2026, 8, 6, 9, 25), "open": 20, "high": 21, "low": 19, "close": 20.5, "volume": 1},
+        {"symbol": "BBB", "ts": datetime(2026, 8, 6, 9, 40), "open": 20, "high": 21, "low": 19, "close": 20.5, "volume": 1},
+    ]
+
+    summary = summarize_rows(rows, expected_step=timedelta(minutes=5))
+
+    assert summary["gap_count"] == 2

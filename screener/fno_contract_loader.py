@@ -31,6 +31,7 @@ class FnoContractLoader:
         self.last_refresh: datetime | None = None
         self.db_manager: DatabaseManager | None = None
         self._background_thread: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
         self._refresh_lock = threading.Lock()
         try:
             self.db_manager = DatabaseManager()
@@ -44,23 +45,25 @@ class FnoContractLoader:
         """Load cached F&O contracts from ORM storage if recent."""
         cached = get_cached_fno_contracts()
         if cached:
-            self.contracts = list(cached.get("contracts", []))
-            self.last_refresh = cached.get("last_refresh")
-            if self.contracts:
-                log.info(
-                    f"Loaded {len(self.contracts)} F&O contracts from in-memory cache"
-                )
-                return
+            cached_last_refresh = cached.get("last_refresh")
+            if isinstance(cached_last_refresh, datetime) and (
+                datetime.now() - cached_last_refresh
+            ) <= timedelta(hours=self.CACHE_DURATION_HOURS):
+                self.contracts = list(cached.get("contracts", []))
+                self.last_refresh = cached_last_refresh
+                if self.contracts:
+                    log.info(
+                        f"Loaded {len(self.contracts)} F&O contracts from in-memory cache"
+                    )
+                    return
         if self.db_manager:
             try:
                 contracts, cache_time = self.db_manager.load_fno_contract_cache()
-                self.contracts = contracts
-                if cache_time:
+                if cache_time and (
+                    datetime.now() - cache_time
+                ) <= timedelta(hours=self.CACHE_DURATION_HOURS):
+                    self.contracts = contracts
                     self.last_refresh = cache_time
-                if self.last_refresh and (
-                    datetime.now() - self.last_refresh
-                ) > timedelta(hours=self.CACHE_DURATION_HOURS):
-                    self.contracts = []
                 if self.contracts:
                     log.info(
                         f"Loaded {len(self.contracts)} F&O contracts from ORM cache"
@@ -75,32 +78,33 @@ class FnoContractLoader:
 
     def _start_background_refresh(self) -> None:
         """Start background thread to refresh F&O contract list."""
-        if self._background_thread and self._background_thread.is_alive():
-            return
-        self._background_thread = threading.Thread(
-            target=self._refresh_contracts_async, daemon=True
-        )
-        self._background_thread.start()
+        with self._lifecycle_lock:
+            if self._background_thread and self._background_thread.is_alive():
+                return
+            self._background_thread = threading.Thread(
+                target=self._refresh_contracts_async, daemon=True
+            )
+            self._background_thread.start()
 
     def _refresh_contracts_async(self) -> None:
         """Background refresh of F&O contracts list"""
-        try:
-            log.info("Starting background F&O contracts refresh")
-            self._refresh_contracts_sync()
-        except Exception as e:
-            log.error(f"Background F&O refresh failed: {e}")
+        with self._refresh_lock:
+            try:
+                log.info("Starting background F&O contracts refresh")
+                self._refresh_contracts_sync()
+            except Exception as e:
+                log.error(f"Background F&O refresh failed: {e}")
 
     def _refresh_contracts_sync(self) -> None:
         """Fetch F&O contracts from Zerodha instrument list API synchronously"""
-        with self._refresh_lock:
-            try:
-                if self.contracts and self.last_refresh and (
-                    datetime.now() - self.last_refresh
-                ) < timedelta(hours=self.CACHE_DURATION_HOURS):
-                    log.debug("F&O contracts already fresh; skipping refresh")
-                    return
-            except Exception:
-                pass
+        try:
+            if self.contracts and self.last_refresh and (
+                datetime.now() - self.last_refresh
+            ) < timedelta(hours=self.CACHE_DURATION_HOURS):
+                log.debug("F&O contracts already fresh; skipping refresh")
+                return
+        except Exception:
+            pass
         try:
             # Load configuration from config.yaml
             config_path = os.path.join(
