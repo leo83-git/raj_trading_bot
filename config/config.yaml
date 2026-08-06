@@ -37,6 +37,12 @@ processing:
   fno_batch_size: 8              # Number of symbols to process per batch
   fno_max_concurrent: 3          # Maximum number of batches to run concurrently
   fno_task_timeout_seconds: 120  # Per-symbol timeout within batch processing
+
+scheduler:
+  enabled: false
+  scan_interval_seconds: 60
+  manage_interval_seconds: 15
+  loop_sleep_seconds: 1
 cache:
   enabled: true
   ttl_quote: 15  # seconds, increased for reliability

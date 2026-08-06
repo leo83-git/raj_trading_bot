@@ -703,6 +703,26 @@ class RajTradingBot:
         self.position_tracker = PositionTracker(self.broker)
         self.risk_manager = RiskManager(self.config)
 
+        scheduler_config = self.config.get("scheduler", {})
+        self.scheduler_enabled = bool(scheduler_config.get("enabled", False))
+        self.scan_interval_seconds = float(
+            scheduler_config.get("scan_interval_seconds", 60.0)
+        )
+        self.manage_interval_seconds = float(
+            scheduler_config.get("manage_interval_seconds", 15.0)
+        )
+        self.loop_sleep_seconds = float(scheduler_config.get("loop_sleep_seconds", 1.0))
+        self.scan_interval_seconds = max(self.scan_interval_seconds, 1.0)
+        self.manage_interval_seconds = max(self.manage_interval_seconds, 1.0)
+        self.loop_sleep_seconds = max(self.loop_sleep_seconds, 0.1)
+        self._scheduler_stop_event = threading.Event()
+        self._scan_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="raj-trading-scan"
+        )
+        self._active_scan_future = None
+        self._next_scan_due_monotonic = None
+        self._next_manage_due_monotonic = None
+
         # Disable price cache when watchlist is off before initialization.
         # Respect an explicit ``price_cache.enabled`` flag – if the user has
         # explicitly enabled the cache we should not override it just because
@@ -782,8 +802,6 @@ class RajTradingBot:
             # Ensure a thread‑safe lock is always available for dynamic stop
             # updates and profit‑ladder operations, even when layer setup is
             # mocked out in tests.
-            import threading
-
             self._simulation_lock = threading.Lock()
             
         # Update Managers with the simulation engine
@@ -882,6 +900,10 @@ class RajTradingBot:
             # Daily Zerodha request token check (if using Zerodha broker)
             self._check_zerodha_daily_token()
 
+            if self.scheduler_enabled:
+                self._run_scheduled_main_loop()
+                return
+
             # Run initial market scan – may raise SystemExit in tests
             self._run_trading_cycle()
 
@@ -966,6 +988,88 @@ class RajTradingBot:
         finally:
             # Ensure resources are cleaned up regardless of how the loop exits.
             self._shutdown()
+
+    def _run_scheduled_main_loop(self):
+        """Run the monotonic scheduler for repeated scans and position checks."""
+
+        self._scheduler_stop_event.clear()
+        now = time.monotonic()
+        self._next_scan_due_monotonic = now
+        self._next_manage_due_monotonic = now
+
+        try:
+            while getattr(self, "_running", True) and _running:
+                import datetime as dt
+
+                current_time = dt.datetime.now()
+                market_time = current_time.time()
+                market_close_time = dt.time(15, 20)
+
+                if market_time >= market_close_time:
+                    log.info(f"Market closing ({market_time}), squaring off all positions...")
+                    self._scheduler_stop_event.set()
+                    self._close_all_positions()
+                    self.generate_daily_report()
+                    self.auto_train_after_market()
+                    try:
+                        stats = self.simulation.get_stats()
+                        send_telegram_message(
+                            f"📊 Day End Summary\nPnL: ₹{stats.get('pnl', 0):.2f}\nTrades: {stats.get('closed_trades', 0)}\nWin Rate: {stats.get('win_rate', 0) * 100:.0f}%"
+                        )
+                    except Exception:
+                        pass
+                    break
+
+                self._poll_active_scan_future()
+
+                now_mono = time.monotonic()
+                if now_mono >= self._next_manage_due_monotonic:
+                    try:
+                        self._manage_positions()
+                    except Exception as exc:
+                        log.exception("Position management failed in scheduler: %s", exc)
+                    finally:
+                        self._next_manage_due_monotonic = now_mono + self.manage_interval_seconds
+
+                if (
+                    now_mono >= self._next_scan_due_monotonic
+                    and not self._is_scan_in_progress()
+                ):
+                    if self._scheduler_stop_event.is_set():
+                        break
+                    self._active_scan_future = self._scan_executor.submit(
+                        self._run_trading_cycle,
+                        scheduled_scan_only=True,
+                    )
+                    self._next_scan_due_monotonic = now_mono + self.scan_interval_seconds
+
+                sleep_for = self.loop_sleep_seconds
+                if self._is_scan_in_progress():
+                    sleep_for = min(sleep_for, 0.25)
+                time.sleep(sleep_for)
+        finally:
+            self._scheduler_stop_event.set()
+            self._poll_active_scan_future()
+
+    def _is_scan_in_progress(self) -> bool:
+        future = getattr(self, "_active_scan_future", None)
+        return future is not None and not future.done()
+
+    def _poll_active_scan_future(self) -> None:
+        future = getattr(self, "_active_scan_future", None)
+        if future is None or not future.done():
+            return
+        self._active_scan_future = None
+        try:
+            future.result()
+        except BaseException as exc:
+            log.exception("Scheduled trading scan failed: %s", exc)
+
+    def _should_abort_scheduled_work(self) -> bool:
+        """Return True when the scheduler is shutting down or has been stopped."""
+
+        scheduler_stop_event = getattr(self, "_scheduler_stop_event", None)
+        return scheduler_stop_event is not None and scheduler_stop_event.is_set()
 
     def _safe_threaded_call(self, func, *args, timeout: float = 10.0, **kwargs):
         """Run a blocking function in a thread and enforce a timeout."""
@@ -2684,6 +2788,16 @@ class RajTradingBot:
                         }
                     )
                     continue
+            if self._should_abort_scheduled_work():
+                log.info(
+                    "Skipping option leg submission because scheduler stop was requested"
+                )
+                return {
+                    "status": "cancelled",
+                    "strategy": strategy_name,
+                    "legs": executed_legs,
+                    "net_cost": total_cost,
+                }
             result = self.order_manager.place_order(
                 symbol=opt_symbol,
                 quantity=lot_size,
@@ -5017,7 +5131,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
 
         log.info("=" * 50)
 
-    def _run_trading_cycle(self):
+    def _run_trading_cycle(self, scheduled_scan_only: bool = False):
         log.info("Running trading cycle...")
 
         # Periodic MCP health check (every 30 cycles or so) - DISABLED FOR TRADING CYCLES
@@ -5112,20 +5226,23 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             log.info(f"Event blackout: {event_reason} - skipping trading cycle")
             return
 
-        # Check and manage existing positions with timeout to prevent hanging
+        # Check and manage existing positions with timeout to prevent hanging.
+        # Scheduled scans can opt out so position management runs only on the
+        # independently scheduled path.
         import concurrent.futures
         import time as time_module
 
-        manage_start = time_module.time()
-        try:
-            self._manage_positions()
-            manage_elapsed = time_module.time() - manage_start
-            if manage_elapsed > 30:
-                log.warning(
-                    f"Position management took {manage_elapsed:.1f}s (consider optimization)"
-                )
-        except Exception as e:
-            log.error(f"Position management failed: {e}")
+        if not scheduled_scan_only:
+            manage_start = time_module.time()
+            try:
+                self._manage_positions()
+                manage_elapsed = time_module.time() - manage_start
+                if manage_elapsed > 30:
+                    log.warning(
+                        f"Position management took {manage_elapsed:.1f}s (consider optimization)"
+                    )
+            except Exception as e:
+                log.error(f"Position management failed: {e}")
 
         # Process time-based options strategies (e.g., short straddle)
         self._process_short_straddle(now)
@@ -7898,6 +8015,17 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             }
 
                         # Execute trade
+                        if self._should_abort_scheduled_work():
+                            log.info(
+                                "Skipping order submission because scheduler stop was requested"
+                            )
+                            return {
+                                "processed": False,
+                                "symbol": symbol,
+                                "category": category,
+                                "result": {"error": "scheduler_stopping"},
+                                "suggestion": {},
+                            }
                         result = self.order_manager.place_order(
                             symbol=symbol,
                             quantity=signal.get("quantity", 1),
@@ -9624,6 +9752,21 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                 log.info("WebSocket connection closed")
             except Exception as exc_ws:
                 log.debug(f"Failed to close WebSocket during shutdown: {exc_ws}")
+
+        if getattr(self, "_scheduler_stop_event", None) is not None:
+            self._scheduler_stop_event.set()
+        if getattr(self, "_active_scan_future", None) is not None:
+            try:
+                self._active_scan_future.result(timeout=5.0)
+            except concurrent.futures.TimeoutError:
+                log.warning("Timed out waiting for active scheduled scan to stop")
+            except BaseException as exc:
+                log.debug(f"Active scheduled scan ended during shutdown: {exc}")
+        if getattr(self, "_scan_executor", None) is not None:
+            try:
+                self._scan_executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                self._scan_executor.shutdown(wait=False)
 
     def _manage_positions(self):
         """Monitor and manage open positions - trailing SL, target hits, expiry"""
