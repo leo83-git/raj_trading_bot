@@ -39,7 +39,7 @@ processing:
   fno_task_timeout_seconds: 120  # Per-symbol timeout within batch processing
 
 scheduler:
-  enabled: true
+  enabled: false
   scan_interval_seconds: 60
   manage_interval_seconds: 15
   loop_sleep_seconds: 1
