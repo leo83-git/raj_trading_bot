@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Iterator
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, select
@@ -169,7 +169,7 @@ class DatabaseManager:
 
     def save_trade(self, trade_data: dict[str, Any]) -> Trade:
         """Persist an executed trade."""
-        timestamp = trade_data.get("timestamp") or datetime.utcnow()
+        timestamp = trade_data.get("timestamp") or datetime.now(UTC)
         trade = Trade(
             symbol=str(trade_data["symbol"]),
             quantity=int(trade_data["quantity"]),
@@ -201,7 +201,7 @@ class DatabaseManager:
                 position.quantity = int(position_data.get("quantity", position.quantity))
                 position.avg_price = float(position_data.get("avg_price", position.avg_price))
                 position.action = str(position_data.get("action", position.action))
-                position.updated_at = datetime.utcnow()
+                position.updated_at = datetime.now(UTC)
 
             session.flush()
             session.refresh(position)
@@ -281,7 +281,7 @@ class DatabaseManager:
 
     def replace_fno_contract_cache(self, contracts: list[dict[str, Any]], last_refresh: datetime | None = None) -> int:
         """Replace the F&O contract cache and metadata."""
-        refresh_time = last_refresh or datetime.utcnow()
+        refresh_time = last_refresh or datetime.now(UTC)
         # Keep the last occurrence for each symbol so a noisy source payload
         # cannot violate the primary-key constraint during refresh.
         deduped_contracts: dict[str, dict[str, Any]] = {}
@@ -362,7 +362,7 @@ class DatabaseManager:
                         ),
                         bids_json=row.get("bids_json"),
                         asks_json=row.get("asks_json"),
-                        timestamp=row.get("timestamp") or datetime.utcnow(),
+                        timestamp=row.get("timestamp") or datetime.now(UTC),
                     )
                 )
                 count += 1

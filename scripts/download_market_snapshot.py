@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -322,7 +322,7 @@ def fetch_rest_rows(token_meta: dict[int, dict], api_key: str, access_token: str
                     "last_price": entry.get("last_price") or entry.get("close"),
                     "quote_json": json.dumps(entry, default=str),
                     "depth_json": json.dumps(entry.get("depth") or {}, default=str),
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(UTC).isoformat(),
                 }
             )
     return rows
@@ -368,7 +368,7 @@ def collect_chunk(
                         "last_price": entry.get("close"),
                         "quote_json": json.dumps(entry, default=str),
                         "depth_json": json.dumps(depth, default=str),
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(UTC).isoformat(),
                     }
                 )
 
