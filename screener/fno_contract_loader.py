@@ -13,6 +13,7 @@ import yaml
 
 from core.database import DatabaseManager
 from quant_utils.logger import get_logger
+from utils.cache import get_cached_fno_contracts, set_cached_fno_contracts
 
 log = get_logger("fno_contract_loader")
 
@@ -29,26 +30,27 @@ class FnoContractLoader:
         self.contracts: list[dict] = []
         self.last_refresh: datetime | None = None
         self.db_manager: DatabaseManager | None = None
+        self._background_thread: threading.Thread | None = None
+        self._refresh_lock = threading.Lock()
         try:
             self.db_manager = DatabaseManager()
             log.info("DatabaseManager initialized for F&O contract cache")
         except Exception as exc:
             log.debug(f"DatabaseManager unavailable for F&O cache: {exc}")
         self._load_cache()
-        # If the cache is missing or older than 1 hour, perform a synchronous refresh
-        # so that the loader has a fresh contract list before the pipelines start.
-        # Refresh synchronously if the cache is older than **2 hours** (instead of the previous 1‑hour threshold).
-        if self.last_refresh is None or (
-            datetime.now() - self.last_refresh
-        ) > timedelta(hours=2):
-            log.info(
-                "Cache stale or missing – performing synchronous refresh before background thread"
-            )
-            self._refresh_contracts_sync()
         self._start_background_refresh()
 
     def _load_cache(self) -> None:
         """Load cached F&O contracts from ORM storage if recent."""
+        cached = get_cached_fno_contracts()
+        if cached:
+            self.contracts = list(cached.get("contracts", []))
+            self.last_refresh = cached.get("last_refresh")
+            if self.contracts:
+                log.info(
+                    f"Loaded {len(self.contracts)} F&O contracts from in-memory cache"
+                )
+                return
         if self.db_manager:
             try:
                 contracts, cache_time = self.db_manager.load_fno_contract_cache()
@@ -63,18 +65,22 @@ class FnoContractLoader:
                     log.info(
                         f"Loaded {len(self.contracts)} F&O contracts from ORM cache"
                     )
+                    set_cached_fno_contracts(
+                        "default",
+                        {"contracts": self.contracts, "last_refresh": self.last_refresh},
+                    )
+                    return
             except Exception as e:
                 log.warning(f"Failed to load F&O ORM cache: {e}")
 
-        if not self.contracts:
-            # No cached contracts available, refresh synchronously to ensure the loader has data.
-            log.info("No F&O contracts found in cache; attempting synchronous refresh")
-            self._refresh_contracts_sync()
-
     def _start_background_refresh(self) -> None:
-        """Start background thread to refresh F&O contract list"""
-        thread = threading.Thread(target=self._refresh_contracts_async, daemon=True)
-        thread.start()
+        """Start background thread to refresh F&O contract list."""
+        if self._background_thread and self._background_thread.is_alive():
+            return
+        self._background_thread = threading.Thread(
+            target=self._refresh_contracts_async, daemon=True
+        )
+        self._background_thread.start()
 
     def _refresh_contracts_async(self) -> None:
         """Background refresh of F&O contracts list"""
@@ -86,6 +92,15 @@ class FnoContractLoader:
 
     def _refresh_contracts_sync(self) -> None:
         """Fetch F&O contracts from Zerodha instrument list API synchronously"""
+        with self._refresh_lock:
+            try:
+                if self.contracts and self.last_refresh and (
+                    datetime.now() - self.last_refresh
+                ) < timedelta(hours=self.CACHE_DURATION_HOURS):
+                    log.debug("F&O contracts already fresh; skipping refresh")
+                    return
+            except Exception:
+                pass
         try:
             # Load configuration from config.yaml
             config_path = os.path.join(
@@ -153,10 +168,18 @@ class FnoContractLoader:
             self.last_refresh = datetime.now()
             log.info(f"Refreshed {len(self.contracts)} F&O contracts from Zerodha")
             self._save_cache()
+            set_cached_fno_contracts(
+                "default",
+                {"contracts": self.contracts, "last_refresh": self.last_refresh},
+            )
 
         except Exception as e:
             log.error(f"Failed to refresh F&O contracts from Zerodha: {e}")
             # Keep existing contracts if refresh fails
+
+    def refresh_async(self) -> None:
+        """Explicitly trigger a background refresh."""
+        self._start_background_refresh()
 
     def _save_cache(self) -> None:
         """Save F&O contracts to ORM cache."""

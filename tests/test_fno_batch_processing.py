@@ -230,3 +230,29 @@ def test_fno_contract_loader_deduplicates_by_symbol():
     assert deduped[0]["symbol"] == "BANKNIFTY26AUGFUT"
     assert deduped[0]["instrument_token"] == "2002"
     assert deduped[1]["symbol"] == "NIFTY26AUGFUT"
+
+
+def test_fno_contract_loader_init_does_not_force_sync_refresh(monkeypatch):
+    """Loader init should rely on cached data and background refresh only."""
+
+    from screener import fno_contract_loader as module
+    from utils import cache as cache_module
+
+    class FakeDB:
+        def load_fno_contract_cache(self):
+            return [], None
+
+    cache_module.clear_caches()
+    monkeypatch.setattr(module, "DatabaseManager", lambda: FakeDB())
+    monkeypatch.setattr(module.FnoContractLoader, "_start_background_refresh", lambda self: None)
+    called = {"sync": 0}
+
+    def fake_refresh(self):
+        called["sync"] += 1
+
+    monkeypatch.setattr(module.FnoContractLoader, "_refresh_contracts_sync", fake_refresh)
+
+    loader = module.FnoContractLoader()
+
+    assert called["sync"] == 0
+    assert loader.contracts == []

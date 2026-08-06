@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 
+from sqlalchemy import create_engine, inspect
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "scripts" / "download_market_snapshot.py"
@@ -98,3 +100,14 @@ def test_collect_chunk_falls_back_to_rest_quotes_when_websocket_cache_is_empty(m
     assert len(rows) == 1
     assert rows[0]["instrument_token"] == 12345
     assert rows[0]["last_price"] == 123.45
+
+
+def test_ensure_table_uses_canonical_snapshot_columns(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'snapshot.db'}", future=True)
+    table = module.ensure_table(engine)
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("market_snapshot")}
+
+    assert {"instrument_token", "symbol", "exchange", "last_price", "bids_json", "asks_json", "timestamp"}.issubset(columns)
+    assert "quote_json" not in columns
+    assert "depth_json" not in columns
