@@ -21,6 +21,9 @@ class OptionsEdgeSignal:
     theta_decay: float
     vega_exposure: float
     rationale: str
+    validated: bool = True
+    rejection_reasons: tuple[str, ...] = ()
+    defined_risk: bool = False
 
 
 class IVPercentileTracker:
@@ -218,6 +221,91 @@ class OptionsStrategySelector:
         self.vega_manager = VegaExposureManager()
 
     def select_strategy(
+        self,
+        symbol: str,
+        spot: float,
+        iv: float,
+        time_to_expiry: float = 7 / 365,
+        regime: str = "SIDEWAYS",
+        *,
+        signal_validated: bool = True,
+        theta: float | None = None,
+        open_interest: int | None = None,
+        skew: float | None = None,
+        prefer_defined_risk: bool | None = None,
+    ) -> OptionsEdgeSignal:
+        """Return a validated strategy signal while preserving the legacy API."""
+        dte = float(time_to_expiry) * 365
+        reasons: list[str] = []
+        if not signal_validated:
+            reasons.append("upstream_signal_not_validated")
+        if dte < float(self.config.get("min_dte", 1)) or dte > float(
+            self.config.get("max_dte", 45)
+        ):
+            reasons.append("dte_out_of_range")
+        min_oi = int(self.config.get("min_open_interest", 0))
+        if open_interest is not None and open_interest < min_oi:
+            reasons.append("open_interest_below_minimum")
+        min_theta = float(self.config.get("min_theta", 0))
+        if theta is not None and abs(theta) < min_theta:
+            reasons.append("theta_below_minimum")
+        max_skew = float(self.config.get("max_abs_skew", 100))
+        if skew is not None and abs(skew) > max_skew:
+            reasons.append("skew_above_maximum")
+        if reasons:
+            return OptionsEdgeSignal(
+                "NEUTRAL",
+                "NONE",
+                0.0,
+                0.0,
+                float(theta or 0),
+                0.0,
+                "; ".join(reasons),
+                False,
+                tuple(reasons),
+                False,
+            )
+
+        signal = self._select_strategy_legacy(symbol, spot, iv, time_to_expiry, regime)
+        defined = signal.strategy in {
+            "IRON_CONDOR",
+            "IRON_BUTTERFLY",
+            "BEAR_CALL_SPREAD",
+            "BULL_PUT_SPREAD",
+            "LONG_CALL",
+            "LONG_PUT",
+            "LONG_STRADDLE",
+        }
+        prefer = (
+            self.config.get("prefer_defined_risk", True)
+            if prefer_defined_risk is None
+            else prefer_defined_risk
+        )
+        replacements = {
+            "SHORT_CALL": "BEAR_CALL_SPREAD",
+            "SHORT_PUT": "BULL_PUT_SPREAD",
+            "CASH_SECURED_PUT": "BULL_PUT_SPREAD",
+            "SHORT_STRADDLE": "IRON_BUTTERFLY",
+        }
+        if prefer and self.multi_leg_enabled and signal.strategy in replacements:
+            strategy = replacements[signal.strategy]
+            signal = OptionsEdgeSignal(
+                signal.action,
+                strategy,
+                signal.confidence,
+                signal.iv_percentile,
+                signal.theta_decay,
+                signal.vega_exposure,
+                f"{signal.rationale}; defined-risk preference selected {strategy}",
+                True,
+                (),
+                True,
+            )
+        elif signal.validated:
+            signal.defined_risk = defined
+        return signal
+
+    def _select_strategy_legacy(
         self,
         symbol: str,
         spot: float,

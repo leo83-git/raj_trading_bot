@@ -12,6 +12,7 @@ import requests
 import yaml
 
 from core.database import DatabaseManager
+from core.options.models import OptionChain, normalize_option_chain
 from quant_utils.logger import get_logger
 from utils.cache import get_cached_fno_contracts, set_cached_fno_contracts
 
@@ -59,9 +60,9 @@ class FnoContractLoader:
         if self.db_manager:
             try:
                 contracts, cache_time = self.db_manager.load_fno_contract_cache()
-                if cache_time and (
-                    datetime.now() - cache_time
-                ) <= timedelta(hours=self.CACHE_DURATION_HOURS):
+                if cache_time and (datetime.now() - cache_time) <= timedelta(
+                    hours=self.CACHE_DURATION_HOURS
+                ):
                     self.contracts = contracts
                     self.last_refresh = cache_time
                 if self.contracts:
@@ -70,7 +71,10 @@ class FnoContractLoader:
                     )
                     set_cached_fno_contracts(
                         "default",
-                        {"contracts": self.contracts, "last_refresh": self.last_refresh},
+                        {
+                            "contracts": self.contracts,
+                            "last_refresh": self.last_refresh,
+                        },
                     )
                     return
             except Exception as e:
@@ -98,9 +102,12 @@ class FnoContractLoader:
     def _refresh_contracts_sync(self) -> None:
         """Fetch F&O contracts from Zerodha instrument list API synchronously"""
         try:
-            if self.contracts and self.last_refresh and (
-                datetime.now() - self.last_refresh
-            ) < timedelta(hours=self.CACHE_DURATION_HOURS):
+            if (
+                self.contracts
+                and self.last_refresh
+                and (datetime.now() - self.last_refresh)
+                < timedelta(hours=self.CACHE_DURATION_HOURS)
+            ):
                 log.debug("F&O contracts already fresh; skipping refresh")
                 return
         except Exception:
@@ -223,3 +230,15 @@ class FnoContractLoader:
     def get_fno_symbols(self) -> list[str]:
         """Get list of F&O contract symbols"""
         return [contract["symbol"] for contract in self.contracts]
+
+    def get_option_chain(self, underlying: str) -> OptionChain:
+        """Return matching cached contracts through the canonical typed parser."""
+        prefix = underlying.strip().upper()
+        rows = [
+            contract
+            for contract in self.contracts
+            if str(contract.get("symbol", "")).upper().startswith(prefix)
+        ]
+        return normalize_option_chain(
+            {"data": rows, "symbol": prefix, "source": "local_db"}, prefix
+        )

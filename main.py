@@ -22,6 +22,9 @@ from typing import Any
 
 import yaml
 
+from core.options.chain_manager import option_chain_manager
+from core.options.contract_selector import ContractSelector, SelectionCriteria
+from core.options.models import OptionType
 from core.order_manager import OrderManager
 from core.position_tracker import PositionTracker
 from core.risk_manager import RiskManager
@@ -3463,34 +3466,59 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                 log.warning(f"Short Straddle: no option chain for {symbol}")
                 continue
 
-            data = chain.get("data", {})
-            records = data.get("records", {}) if isinstance(data, dict) else {}
-            options_list = records.get("data", []) if isinstance(records, dict) else []
+            typed_chain = option_chain_manager.ingest(chain, symbol)
+            chain_validation = option_chain_manager.validate(
+                typed_chain, live_order=getattr(self, "mode", "PAPER") != "PAPER"
+            )
+            if not chain_validation.accepted:
+                log.warning(
+                    "Short Straddle rejected for %s: %s",
+                    symbol,
+                    ",".join(chain_validation.reasons),
+                )
+                continue
 
-            # Find CE and PE at ATM
-            ce_premium = None
-            pe_premium = None
-            ce_symbol = None
-            pe_symbol = None
-
-            for opt in options_list:
-                strike = opt.get("strikePrice")
-                if strike == atm_strike:
-                    ce_data = opt.get("CE", {})
-                    pe_data = opt.get("PE", {})
-                    ce_premium = ce_data.get("lastPrice") or ce_data.get("LTP") or 0
-                    pe_premium = pe_data.get("lastPrice") or pe_data.get("LTP") or 0
-                    ce_symbol = (
-                        ce_data.get("tradingSymbol")
-                        or ce_data.get("symbol")
-                        or f"{symbol}{atm_strike}CE"
-                    )
-                    pe_symbol = (
-                        pe_data.get("tradingSymbol")
-                        or pe_data.get("symbol")
-                        or f"{symbol}{atm_strike}PE"
-                    )
-                    break
+            selector = ContractSelector()
+            selection_config = ss_config.get("selection", {})
+            common = {
+                "min_dte": int(selection_config.get("min_dte", 1)),
+                "max_dte": int(selection_config.get("max_dte", 14)),
+                "min_volume": int(selection_config.get("min_volume", 0)),
+                "min_open_interest": int(selection_config.get("min_open_interest", 0)),
+                "max_spread_pct": selection_config.get("max_spread_pct"),
+            }
+            ce_selection = selector.select(
+                typed_chain,
+                SelectionCriteria(OptionType.CALL, target_delta=0.5, **common),
+            )
+            pe_selection = selector.select(
+                typed_chain,
+                SelectionCriteria(OptionType.PUT, target_delta=-0.5, **common),
+            )
+            if not ce_selection.accepted or not pe_selection.accepted:
+                reasons = ce_selection.reasons + pe_selection.reasons
+                log.warning(
+                    "Short Straddle contract selection rejected for %s: %s",
+                    symbol,
+                    ",".join(reasons),
+                )
+                continue
+            if (
+                ce_selection.expiry != pe_selection.expiry
+                or ce_selection.contract.strike != pe_selection.contract.strike
+            ):
+                log.warning(
+                    "Short Straddle rejected for %s: CE/PE did not resolve to the same expiry and strike",
+                    symbol,
+                )
+                continue
+            selected_ce = ce_selection.contract
+            selected_pe = pe_selection.contract
+            atm_strike = int(selected_ce.strike)
+            ce_premium = selected_ce.last_price
+            pe_premium = selected_pe.last_price
+            ce_symbol = selected_ce.symbol
+            pe_symbol = selected_pe.symbol
 
             if ce_premium <= 0 or pe_premium <= 0:
                 log.warning(
@@ -8958,6 +8986,28 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                         "suggestion": {},
                     }
 
+                typed_chain = option_chain_manager.ingest(chain, option_symbol)
+                chain_validation = option_chain_manager.validate(
+                    typed_chain,
+                    live_order=getattr(self, "mode", "PAPER") != "PAPER",
+                )
+                if not chain_validation.accepted:
+                    log.warning(
+                        "F&O %s: option chain rejected reasons=%s",
+                        symbol,
+                        chain_validation.reasons,
+                    )
+                    return {
+                        "processed": False,
+                        "symbol": symbol,
+                        "category": category,
+                        "result": {
+                            "error": "option_chain_rejected",
+                            "reasons": list(chain_validation.reasons),
+                        },
+                        "suggestion": {},
+                    }
+
                 # Log chain summary for debugging
                 options_list, records = extract_option_chain_data(chain)
                 expiry_dates = (
@@ -9000,8 +9050,49 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                     f"F&O {symbol}: spot={spot:.1f}, iv={iv:.2f}, time_to_expiry={time_to_expiry:.3f}, regime={regime}"
                 )
 
+                selected_expiry = (
+                    typed_chain.expiries[0] if typed_chain.expiries else None
+                )
+                expiry_contracts = (
+                    typed_chain.for_expiry(selected_expiry) if selected_expiry else ()
+                )
+                open_interest = sum(
+                    contract.open_interest for contract in expiry_contracts
+                )
+                theta_values = [
+                    contract.theta
+                    for contract in expiry_contracts
+                    if contract.theta is not None
+                ]
+                theta = sum(theta_values) / len(theta_values) if theta_values else None
+                call_ivs = [
+                    c.implied_volatility
+                    for c in expiry_contracts
+                    if c.option_type == OptionType.CALL and c.implied_volatility > 0
+                ]
+                put_ivs = [
+                    c.implied_volatility
+                    for c in expiry_contracts
+                    if c.option_type == OptionType.PUT and c.implied_volatility > 0
+                ]
+                skew = (
+                    (sum(put_ivs) / len(put_ivs)) - (sum(call_ivs) / len(call_ivs))
+                    if call_ivs and put_ivs
+                    else None
+                )
                 strategy_signal = self.options_edge.select_strategy(
-                    symbol, spot, iv, time_to_expiry, regime
+                    symbol,
+                    spot,
+                    iv,
+                    time_to_expiry,
+                    regime,
+                    signal_validated=chain_validation.accepted,
+                    theta=theta,
+                    open_interest=open_interest,
+                    skew=skew,
+                    prefer_defined_risk=self.config.get("options_edge", {}).get(
+                        "prefer_defined_risk", True
+                    ),
                 )
 
                 # Check if multi-leg F&O strategies are enabled before logging or branching on them.

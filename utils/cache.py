@@ -13,12 +13,23 @@ fno_contracts_cache = TTLCache(maxsize=4, ttl=24 * 60 * 60)
 
 def get_cached_option_chain(symbol: str) -> dict[str, Any]:
     """Get cached option chain if available."""
+    # Preserve the historical dictionary return type. The same write is
+    # normalized into OptionChainManager by ``set_cached_option_chain``.
     return option_chain_cache.get(symbol)
 
 
 def set_cached_option_chain(symbol: str, data: dict[str, Any]) -> None:
     """Cache option chain data."""
     option_chain_cache[symbol] = data
+    from core.options.chain_manager import option_chain_manager
+    from core.options.models import OptionChain
+
+    chain = (
+        data
+        if isinstance(data, OptionChain)
+        else option_chain_manager.normalize(data, symbol)
+    )
+    option_chain_manager.put(chain)
 
 
 def get_cached_quote(symbol: str) -> dict[str, Any]:

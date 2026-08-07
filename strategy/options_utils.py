@@ -3,7 +3,15 @@
 #  Common functions for options strategies (expiry, strikes, symbols)
 # ═══════════════════════════════════════════════════════════════
 import datetime as dt
+from typing import Any
 
+from core.options.contract_selector import ContractSelector, SelectionCriteria
+from core.options.models import (
+    OptionChain,
+    OptionType,
+    normalize_option_chain,
+    parse_date,
+)
 from quant_utils.logger import get_logger
 
 log = get_logger("options_utils")
@@ -38,7 +46,7 @@ NSE_HOLIDAYS = [
 ]
 
 
-def get_next_expiry(holidays: list[dt.date] = None) -> dt.date:
+def get_next_expiry(holidays: list[dt.date] | None = None) -> dt.date:
     """Calculate next weekly expiry (Thursday for weekly contracts)"""
     if holidays is None:
         holidays = NSE_HOLIDAYS
@@ -112,6 +120,48 @@ def find_option_symbol(instruments_df, strike: int, option_type: str) -> str | N
     except Exception as e:
         log.error(f"Error finding option symbol: {e}")
         return None
+
+
+def normalize_chain(payload: Any, underlying: str = "") -> OptionChain:
+    """Backward-compatible entry point for the canonical typed parser."""
+    return normalize_option_chain(payload, underlying)
+
+
+def select_option_contract(
+    payload: Any,
+    underlying: str,
+    option_type: str,
+    *,
+    target_delta: float | None = None,
+    target_moneyness: float = 0.0,
+    min_dte: int = 1,
+    max_dte: int = 45,
+    min_volume: int = 0,
+    min_open_interest: int = 0,
+    max_spread_pct: float | None = None,
+):
+    """Select a validated contract using delta/moneyness with ATM fallback."""
+    chain = (
+        payload
+        if isinstance(payload, OptionChain)
+        else normalize_chain(payload, underlying)
+    )
+    criteria = SelectionCriteria(
+        option_type=OptionType(str(option_type).upper()),
+        target_delta=target_delta,
+        target_moneyness=target_moneyness,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        min_volume=min_volume,
+        min_open_interest=min_open_interest,
+        max_spread_pct=max_spread_pct,
+    )
+    return ContractSelector().select(chain, criteria)
+
+
+def parse_expiry(value: Any) -> dt.date | None:
+    """Preserved parser wrapper backed by the canonical date parser."""
+    return parse_date(value)
 
 
 def calculate_lot_size(symbol: str) -> int:
