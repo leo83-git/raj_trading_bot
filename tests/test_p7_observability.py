@@ -243,16 +243,17 @@ def test_trade_alert_runs_before_broken_telemetry_payload():
 
     bot = RajTradingBot.__new__(RajTradingBot)
     bot.strategy_tracker = StrategyTracker()
-    alerts: list[tuple] = []
+    call_sequence: list[str] = []
 
     def record_alert(*args):
-        alerts.append(args)
+        call_sequence.append("alert")
 
     def broken_observer(*args, **kwargs):
+        call_sequence.append("telemetry")
         raise RuntimeError("telemetry failed")
 
     bot._send_trade_alert = record_alert
     bot._observe_p7 = broken_observer
 
     bot._record_trade_outcome("NIFTY", "BUY", 100.0, 1, "25", won=True)
-    assert len(alerts) == 1
+    assert call_sequence == ["alert", "telemetry"]
