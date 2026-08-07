@@ -3181,9 +3181,14 @@ class TestBlackoutWindows(unittest.TestCase):
                     mock_dt.datetime.now.return_value = datetime.combine(
                         datetime.today(), mock_time
                     )
-                    with patch.object(qts, "_manage_positions") as mock_manage:
+                    with patch.object(
+                        qts, "_process_short_straddle"
+                    ) as mock_entry_strategy, patch.object(
+                        qts.order_manager, "place_order"
+                    ) as mock_place_order:
                         qts._run_trading_cycle()
-                        mock_manage.assert_called_once()
+                        mock_entry_strategy.assert_not_called()
+                        mock_place_order.assert_not_called()
 
 
 # ===========================================================================
