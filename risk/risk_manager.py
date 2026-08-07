@@ -26,16 +26,21 @@ class RiskManager:
         self.config = config or {}
         self.data_provider = data_provider
 
-        self.paper_trading = self.config.get("paper_trading", True)
-        self.max_daily_loss = self.config.get("max_daily_loss", 15000)
-        self.max_daily_profit = self.config.get("max_daily_profit", 50000)
-        self.max_drawdown = self.config.get("max_drawdown", 0.20)
-        self.max_positions = self.config.get("max_positions", 20)
-        self.max_exposure = self.config.get("max_exposure", 0.30)
-        self.max_latency_ms = self.config.get("max_latency_ms", 500)
-        self.max_correlated_positions = self.config.get("max_correlated_positions", 3)
-        self.correlation_threshold = self.config.get("correlation_threshold", 0.7)
-        self.min_correlation_days = self.config.get("min_correlation_days", 30)
+        # Accept both the historical flat risk config and the application-level
+        # config used by ``RajTradingBot``.
+        risk_config = self.config.get("risk", self.config)
+
+        self.paper_trading = risk_config.get("paper_trading", True)
+        self.max_daily_loss = risk_config.get("max_daily_loss", 15000)
+        self.max_daily_profit = risk_config.get("max_daily_profit", 50000)
+        self.max_drawdown = risk_config.get("max_drawdown", 0.20)
+        self.max_positions = risk_config.get("max_positions", 20)
+        self.max_exposure = risk_config.get("max_exposure", 0.30)
+        self.max_latency_ms = risk_config.get("max_latency_ms", 500)
+        self.max_correlated_positions = risk_config.get("max_correlated_positions", 3)
+        self.correlation_threshold = risk_config.get("correlation_threshold", 0.7)
+        self.min_correlation_days = risk_config.get("min_correlation_days", 30)
+        self.max_capital_per_trade = risk_config.get("max_capital_per_trade", 50000)
 
         self.kill_switch_triggered = False
         self.kill_switch_reason = ""
@@ -121,6 +126,10 @@ class RiskManager:
         size = int(risk_amount / atr_value)
         return max(size, 1)
 
+    def check_trade_allowed(self, current_daily_pnl: float) -> bool:
+        """Compatibility alias for the original core risk-manager API."""
+        return self.check_daily_loss_limit(current_daily_pnl)
+
     def check_daily_loss_limit(self, current_pnl: float) -> bool:
         """Check if daily loss limit is breached"""
         if current_pnl <= -self.max_daily_loss:
@@ -180,7 +189,7 @@ class RiskManager:
         if self.paper_trading:
             return True
 
-        now = datetime.datetime.now()
+        now = datetime.datetime.now().astimezone()
         current_time = now.time()
 
         from datetime import time
@@ -269,7 +278,7 @@ class RiskManager:
                 except (TypeError, ValueError):
                     continue
             return closes
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - external data-provider boundary
             log.debug(f"Historical close fetch failed for {symbol}: {e}")
             return []
 
@@ -364,7 +373,7 @@ class RiskManager:
                             return False
 
                 return True
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - correlation data is optional
                 log.warning(f"Correlation limit check failed for {new_symbol}: {e}")
                 return True
 
@@ -379,8 +388,7 @@ class RiskManager:
             return False
 
         if current_positions is not None and new_symbol:
-            if not self.check_correlation_limits(current_positions, new_symbol):
-                return False
+            return self.check_correlation_limits(current_positions, new_symbol)
 
         return True
 

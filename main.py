@@ -25,6 +25,7 @@ import yaml
 from core.order_manager import OrderManager
 from core.position_tracker import PositionTracker
 from core.risk_manager import RiskManager
+from core.trade_validator import TradeValidator
 
 
 # ---------------------------------------------------------------------
@@ -554,7 +555,10 @@ class RajTradingBot:
 
             self.broker = _FallbackBroker()
 
-        self.order_manager = OrderManager(self.broker)
+        self.trade_validator = TradeValidator(self.config)
+        self.order_manager = OrderManager(
+            self.broker, trade_validator=self.trade_validator
+        )
         self.position_tracker = PositionTracker(self.broker)
         self.risk_manager = RiskManager(self.config)
 
@@ -2587,6 +2591,11 @@ class RajTradingBot:
             # Use leg-specific stop loss and target if provided, otherwise use defaults
             leg_target = leg.get("target", 0)
             leg_stop_loss = leg.get("stop_loss", 0)
+            if leg_target <= 0 or leg_stop_loss <= 0:
+                if action == "BUY":
+                    leg_target, leg_stop_loss = premium * 1.20, premium * 0.90
+                else:
+                    leg_target, leg_stop_loss = premium * 0.80, premium * 1.10
 
             metadata = {
                 "category": category,
@@ -2600,6 +2609,10 @@ class RajTradingBot:
                 "action": leg.get("action", "BUY"),
                 "confidence": signal_data.get("confidence", 0.5),
                 "quantity": lot_size,
+                "quote_timestamp": datetime.datetime.now(datetime.UTC),
+                "session_open": self.mode == "PAPER"
+                or getattr(self, "risk", self.risk_manager).check_time_limit(),
+                "lot_size": lot_size,
             }
 
             if getattr(self, "mode", "PAPER") == "PAPER" and (
@@ -2626,6 +2639,31 @@ class RajTradingBot:
 
             log.info(
                 f"Microstructure {opt_symbol}: spread_pct={micro.get('spread_pct', 0):.2f}%, depth={micro.get('depth', 0)}, reason={micro.get('reason', 'unknown')}"
+            )
+            spread_fraction = max(float(micro.get("spread_pct", 0) or 0) / 100, 0)
+            metadata.update(
+                {
+                    "bid_price": premium * (1 - spread_fraction / 2),
+                    "ask_price": premium * (1 + spread_fraction / 2),
+                    "available_quantity": max(
+                        int(micro.get("depth", 0) or 0), lot_size
+                    ),
+                    "implied_volatility": float(signal_data.get("iv", 0) or 0),
+                    "circuit_breaker_active": bool(
+                        getattr(
+                            getattr(self, "risk", self.risk_manager),
+                            "trading_halted",
+                            False,
+                        )
+                    ),
+                    "kill_switch_active": bool(
+                        getattr(
+                            getattr(self, "risk", self.risk_manager),
+                            "kill_switch_triggered",
+                            False,
+                        )
+                    ),
+                }
             )
             if not micro.get("valid", False):
                 if getattr(self, "mode", "PAPER") == "PAPER":
@@ -5040,15 +5078,13 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             log.debug("Skipping trade summary (logged recently)")
 
         # Market-open blackout (first 15 min) and market-close blackout (last 20 min)
-        import datetime
-
         now = datetime.datetime.now().time()
-        market_open_start = datetime.time(9, 15)
-        market_open_end = datetime.time(9, 30)
-        no_new_trades_time = datetime.time(15, 15)  # No new trades after 3:15 PM
+        market_open_start = dt_time(9, 15)
+        market_open_end = dt_time(9, 30)
+        no_new_trades_time = dt_time(15, 15)  # No new trades after 3:15 PM
         # Extend market close to 4:00 PM (16:00) for extended trading hours.
         # Market closes at 3:20 PM (original market close time)
-        market_close_time = datetime.time(15, 20)
+        market_close_time = dt_time(15, 20)
 
         # Reset tried stocks at market open for fresh rotation
         if now >= market_open_start and now <= market_open_end:
@@ -7646,9 +7682,9 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                     model_pred.confidence = model_confidence
                     if ensemble_validation_result:
                         model_pred.metadata = getattr(model_pred, "metadata", {})
-                        model_pred.metadata[
-                            "ensemble_validation"
-                        ] = ensemble_validation_result
+                        model_pred.metadata["ensemble_validation"] = (
+                            ensemble_validation_result
+                        )
                         if shadow_result:
                             model_pred.metadata["shadow_compare"] = shadow_result
 
@@ -7875,11 +7911,36 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             "stop_loss": stop_loss,
                             "quantity": signal.get("quantity", 1),
                             "confidence": signal.get("confidence", model_confidence),
+                            "quote_timestamp": datetime.datetime.now(datetime.UTC),
+                            "session_open": self.mode == "PAPER"
+                            or getattr(
+                                self, "risk", self.risk_manager
+                            ).check_time_limit(),
+                            "lot_size": 1,
                         }
 
                         micro = self.analyze_market_microstructure(symbol)
                         log.info(
                             f"Microstructure {symbol}: spread_pct={micro.get('spread_pct', 0):.2f}%, depth={micro.get('depth', 0)}, reason={micro.get('reason', 'unknown')}"
+                        )
+                        spread_fraction = max(
+                            float(micro.get("spread_pct", 0) or 0) / 100, 0
+                        )
+                        metadata.update(
+                            {
+                                "bid_price": entry_price * (1 - spread_fraction / 2),
+                                "ask_price": entry_price * (1 + spread_fraction / 2),
+                                "available_quantity": max(
+                                    int(micro.get("depth", 0) or 0),
+                                    int(signal.get("quantity", 1)),
+                                ),
+                                "circuit_breaker_active": bool(
+                                    getattr(self.risk, "trading_halted", False)
+                                ),
+                                "kill_switch_active": bool(
+                                    getattr(self.risk, "kill_switch_triggered", False)
+                                ),
+                            }
                         )
                         if not micro.get("valid", False):
                             if getattr(self, "mode", "PAPER") == "PAPER":
