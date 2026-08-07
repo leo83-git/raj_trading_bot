@@ -87,6 +87,7 @@ logs/
 # Configuration
 # ============================================================================
 *.json
+!tests/fixtures/**/*.json
 !config/config.yaml
 
 # Keep these if required
