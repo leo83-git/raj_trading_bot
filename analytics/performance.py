@@ -2,10 +2,56 @@
 #  Performance Analytics — Statistical Performance Metrics
 # ═══════════════════════════════════════════════════════════════
 import math
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass
 
 from quant_utils.logger import get_logger
 
 log = get_logger("analytics.performance")
+
+
+@dataclass(frozen=True, slots=True)
+class DailyOperationalMetrics:
+    """Compact P7 trading and reliability metrics for one session."""
+
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    drawdown_percent: float = 0.0
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
+    scheduler_cycles: int = 0
+    data_quality_failures: int = 0
+    screened: int = 0
+    signals: int = 0
+    risk_rejections: int = 0
+    executions: int = 0
+    recoveries: int = 0
+
+
+def compact_daily_report(metrics: DailyOperationalMetrics | Mapping[str, float]) -> str:
+    """Render a stable single-line report suitable for logs and alerts."""
+    values = (
+        asdict(metrics) if isinstance(metrics, DailyOperationalMetrics) else metrics
+    )
+    return (
+        "Daily P7 | "
+        f"PnL={float(values.get('realized_pnl', 0)):.2f}/"
+        f"{float(values.get('unrealized_pnl', 0)):.2f} "
+        f"DD={float(values.get('drawdown_percent', 0)):.2f}% "
+        f"Greeks Δ={float(values.get('delta', 0)):.3f} "
+        f"Γ={float(values.get('gamma', 0)):.3f} "
+        f"Θ={float(values.get('theta', 0)):.3f} "
+        f"V={float(values.get('vega', 0)):.3f} "
+        f"cycles={int(values.get('scheduler_cycles', 0))} "
+        f"dq_fail={int(values.get('data_quality_failures', 0))} "
+        f"screened={int(values.get('screened', 0))} "
+        f"signals={int(values.get('signals', 0))} "
+        f"risk_reject={int(values.get('risk_rejections', 0))} "
+        f"exec={int(values.get('executions', 0))} "
+        f"recovery={int(values.get('recoveries', 0))}"
+    )
 
 
 class PerformanceAnalytics:
@@ -231,7 +277,7 @@ class PerformanceAnalytics:
             return {"alpha": 0, "beta": 1, "r_squared": 0}
 
     def generate_performance_report(
-        self, trades: list, equity_curve: list = None
+        self, trades: list, equity_curve: list | None = None
     ) -> dict:
         """Generate comprehensive performance report"""
         if not trades:

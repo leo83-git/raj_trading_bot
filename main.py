@@ -95,6 +95,7 @@ import concurrent.futures
 
 from tqdm import tqdm
 
+from analytics.tracker import EventType, ObservabilityTracker, new_correlation_id
 from quant_utils.logger import get_logger
 
 # Fallback option‑chain fetcher for cases where broker APIs (e.g., Zerodha) do not
@@ -605,6 +606,11 @@ class RajTradingBot:
         self._active_scan_future = None
         self._next_scan_due_monotonic = None
         self._next_manage_due_monotonic = None
+        p7_config = self.config.get("observability", {}).get("p7", {})
+        self.p7_observability_enabled = bool(p7_config.get("enabled", False))
+        self.observability = ObservabilityTracker(
+            max_events=int(p7_config.get("max_events", 2_000))
+        )
 
         # Disable price cache when watchlist is off before initialization.
         # Respect an explicit ``price_cache.enabled`` flag – if the user has
@@ -912,6 +918,11 @@ class RajTradingBot:
 
                 now_mono = time.monotonic()
                 if now_mono >= self._next_manage_due_monotonic:
+                    self._observe_p7(
+                        EventType.SCHEDULER_CYCLE,
+                        "scheduler",
+                        {"task": "manage_positions"},
+                    )
                     try:
                         self._manage_positions()
                     except Exception as exc:
@@ -929,6 +940,11 @@ class RajTradingBot:
                 ):
                     if self._scheduler_stop_event.is_set():
                         break
+                    self._observe_p7(
+                        EventType.SCHEDULER_CYCLE,
+                        "scheduler",
+                        {"task": "market_scan"},
+                    )
                     self._active_scan_future = self._scan_executor.submit(
                         self._run_trading_cycle,
                         scheduled_scan_only=True,
@@ -944,6 +960,28 @@ class RajTradingBot:
         finally:
             self._scheduler_stop_event.set()
             self._poll_active_scan_future()
+
+    def _observe_p7(
+        self,
+        event_type: EventType,
+        source: str,
+        payload: dict | None = None,
+        correlation_id: str | None = None,
+    ) -> str:
+        """Emit optional P7 telemetry without allowing it into trading control flow."""
+        correlation_id = correlation_id or new_correlation_id("cycle")
+        if not getattr(self, "p7_observability_enabled", False):
+            return correlation_id
+        try:
+            self.observability.emit(
+                event_type,
+                source=source,
+                correlation_id=correlation_id,
+                payload=payload or {},
+            )
+        except Exception:  # Telemetry intentionally cannot affect trading.
+            log.debug("P7 event emission failed", exc_info=True)
+        return correlation_id
 
     def _is_scan_in_progress(self) -> bool:
         future = getattr(self, "_active_scan_future", None)
@@ -2854,6 +2892,24 @@ class RajTradingBot:
             strategy_name = metadata.get("strategy") or metadata.get("symbol")
             # Record trade outcome in strategy tracker
             self.strategy_tracker.record_trade(strategy_name, pnl, won)
+            correlation_id = str(
+                metadata.get("correlation_id") or new_correlation_id("trade")
+            )
+            self._observe_p7(
+                EventType.PNL,
+                "trade_outcome",
+                {"symbol": metadata.get("symbol"), "pnl": float(pnl), "won": bool(won)},
+                correlation_id,
+            )
+            self._observe_p7(
+                EventType.POSITION_EXITED,
+                "trade_outcome",
+                {
+                    "symbol": metadata.get("symbol"),
+                    "reason": metadata.get("reason", "unknown"),
+                },
+                correlation_id,
+            )
             # Send alert if configured and pnl magnitude is significant
             if abs(pnl) > 10:
                 self._send_trade_alert(metadata, pnl, won)

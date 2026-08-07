@@ -6,3 +6,13 @@
 ## Notes
 - Use Python 3 for compilation checks
 - Ensure requirements.txt dependencies are installed before running tests
+
+## P7 release safety
+- Keep `observability.p7.enabled: false` until shadow and paper gates pass.
+- Observability, alert, health-check, and checkpoint failures are non-fatal; do
+  not place trading decisions inside telemetry callbacks.
+- Live trading remains prohibited by default. Restricted-live approval requires
+  the gate evidence and rollback drill documented in `README.md`.
+- Emergency flatten is an execution operation, not a telemetry operation. Use
+  the tested broker/execution flatten path, reconcile broker state, and retain
+  correlation IDs in the incident record.

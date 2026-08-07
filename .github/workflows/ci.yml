@@ -29,4 +29,12 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run unit tests
+        run: python -m pytest -q tests/test_p7_observability.py
+
+      - name: Run integration and regression tests
+        env:
+          RUN_LIVE_TESTS: "0"
         run: python -m pytest -q
+
+      - name: Compile changed P7 modules
+        run: python -m py_compile analytics/performance.py analytics/tracker/__init__.py alerts/alert_manager.py quant_utils/logger.py core/database.py main.py

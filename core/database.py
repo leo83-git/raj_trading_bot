@@ -7,13 +7,16 @@ intended to work with PostgreSQL in production.
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any, Iterator
+from typing import Any
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -43,12 +46,17 @@ class Position(Base):
     __tablename__ = "positions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     avg_price: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     action: Mapped[str] = mapped_column(String(16), nullable=False, default="HOLD")
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=False),
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
     )
 
 
@@ -66,6 +74,18 @@ class LogEvent(Base):
     )
 
 
+class RuntimeCheckpoint(Base):
+    """Minimal restart state; high-volume telemetry is intentionally not stored."""
+
+    __tablename__ = "runtime_checkpoints"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, default=datetime.utcnow
+    )
+
+
 class InstrumentCache(Base):
     """Cached market instrument metadata."""
 
@@ -73,7 +93,9 @@ class InstrumentCache(Base):
 
     instrument_token: Mapped[str] = mapped_column(String(32), primary_key=True)
     exchange: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
-    tradingsymbol: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    tradingsymbol: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     expiry: Mapped[str | None] = mapped_column(String(32), nullable=True)
     strike: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -129,7 +151,9 @@ class DatabaseManager:
     def __init__(self, database_url: str | None = None, echo: bool = False) -> None:
         self.database_url = database_url or self._build_database_url()
         self.engine = self._create_engine(self.database_url, echo=echo)
-        self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False)
+        self.session_factory = sessionmaker(
+            bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False
+        )
         Base.metadata.create_all(self.engine)
 
     def _create_engine(self, database_url: str, echo: bool = False) -> Engine:
@@ -175,7 +199,11 @@ class DatabaseManager:
             quantity=int(trade_data["quantity"]),
             price=float(trade_data["price"]),
             action=str(trade_data["action"]),
-            timestamp=timestamp if isinstance(timestamp, datetime) else datetime.fromisoformat(str(timestamp)),
+            timestamp=(
+                timestamp
+                if isinstance(timestamp, datetime)
+                else datetime.fromisoformat(str(timestamp))
+            ),
             pnl=float(trade_data.get("pnl", 0.0)),
         )
         with self.get_session() as session:
@@ -193,13 +221,19 @@ class DatabaseManager:
                 position = Position(
                     symbol=symbol,
                     quantity=int(position_data.get("quantity", 0)),
-                    avg_price=float(position_data.get("avg_price", position_data.get("price", 0.0))),
+                    avg_price=float(
+                        position_data.get("avg_price", position_data.get("price", 0.0))
+                    ),
                     action=str(position_data.get("action", "HOLD")),
                 )
                 session.add(position)
             else:
-                position.quantity = int(position_data.get("quantity", position.quantity))
-                position.avg_price = float(position_data.get("avg_price", position.avg_price))
+                position.quantity = int(
+                    position_data.get("quantity", position.quantity)
+                )
+                position.avg_price = float(
+                    position_data.get("avg_price", position.avg_price)
+                )
                 position.action = str(position_data.get("action", position.action))
                 position.updated_at = datetime.now(UTC)
 
@@ -220,6 +254,52 @@ class DatabaseManager:
             session.flush()
             session.refresh(event)
             return event
+
+    def save_runtime_checkpoint(
+        self, key: str, payload: dict[str, Any]
+    ) -> RuntimeCheckpoint | None:
+        """Best-effort upsert of only the state required for safe recovery."""
+        try:
+            encoded = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), default=str
+            )
+            with self.get_session() as session:
+                checkpoint = session.get(RuntimeCheckpoint, key)
+                if checkpoint is None:
+                    checkpoint = RuntimeCheckpoint(key=key, payload_json=encoded)
+                    session.add(checkpoint)
+                else:
+                    checkpoint.payload_json = encoded
+                    checkpoint.updated_at = datetime.now(UTC)
+                session.flush()
+                session.refresh(checkpoint)
+                return checkpoint
+        except SQLAlchemyError:
+            return None
+
+    def load_runtime_checkpoint(self, key: str) -> dict[str, Any] | None:
+        """Load a restart checkpoint, returning ``None`` for missing/corrupt state."""
+        try:
+            with self.get_session() as session:
+                checkpoint = session.get(RuntimeCheckpoint, key)
+                if checkpoint is None:
+                    return None
+                value = json.loads(checkpoint.payload_json)
+                return value if isinstance(value, dict) else None
+        except (json.JSONDecodeError, SQLAlchemyError, TypeError):
+            return None
+
+    def delete_runtime_checkpoint(self, key: str) -> bool:
+        """Clear recovery state after broker reconciliation completes."""
+        try:
+            with self.get_session() as session:
+                checkpoint = session.get(RuntimeCheckpoint, key)
+                if checkpoint is None:
+                    return False
+                session.delete(checkpoint)
+                return True
+        except SQLAlchemyError:
+            return False
 
     def replace_instrument_cache(self, instruments: list[dict[str, Any]]) -> int:
         """Replace the instrument cache with a fresh dump."""
@@ -279,7 +359,9 @@ class DatabaseManager:
                 for row in rows
             ]
 
-    def replace_fno_contract_cache(self, contracts: list[dict[str, Any]], last_refresh: datetime | None = None) -> int:
+    def replace_fno_contract_cache(
+        self, contracts: list[dict[str, Any]], last_refresh: datetime | None = None
+    ) -> int:
         """Replace the F&O contract cache and metadata."""
         refresh_time = last_refresh or datetime.now(UTC)
         # Keep the last occurrence for each symbol so a noisy source payload
@@ -293,7 +375,9 @@ class DatabaseManager:
 
         with self.get_session() as session:
             session.query(FnoContractCache).delete()
-            session.merge(CacheMetadata(key="last_refresh", value=refresh_time.isoformat()))
+            session.merge(
+                CacheMetadata(key="last_refresh", value=refresh_time.isoformat())
+            )
             count = 0
             for symbol, contract in deduped_contracts.items():
                 session.add(

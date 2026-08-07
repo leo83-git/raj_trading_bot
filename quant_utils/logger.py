@@ -4,9 +4,25 @@
 import logging
 import sys
 import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from logging import NullHandler
 from logging.handlers import RotatingFileHandler, SysLogHandler
 from pathlib import Path
+from typing import Any, ClassVar
+
+_correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
+
+
+@contextmanager
+def correlation_scope(correlation_id: str) -> Iterator[None]:
+    """Attach a correlation ID to logs in the current thread/task context."""
+    token = _correlation_id.set(correlation_id)
+    try:
+        yield
+    finally:
+        _correlation_id.reset(token)
 
 
 # Linux-optimized structured formatter
@@ -27,6 +43,11 @@ class LinuxStructuredFormatter(logging.Formatter):
             "process_id": record.process,
             "thread_id": record.thread,
         }
+        correlation_id = getattr(record, "correlation_id", "") or _correlation_id.get()
+        if correlation_id:
+            log_data["correlation_id"] = correlation_id
+        if hasattr(record, "event_type"):
+            log_data["event_type"] = record.event_type
 
         if self.include_lineno:
             log_data["line"] = record.lineno
@@ -45,7 +66,7 @@ class LinuxStructuredFormatter(logging.Formatter):
 class ColoredLinuxFormatter(logging.Formatter):
     """Colorized formatter for console output with Linux ANSI codes"""
 
-    COLORS = {
+    COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": "\033[36m",  # Cyan
         "INFO": "\033[32m",  # Green
         "WARNING": "\033[33m",  # Yellow
@@ -220,6 +241,21 @@ def get_logger(
 def get_structured_logger(name: str, level: str = "INFO") -> logging.Logger:
     """Convenience function to get JSON structured logger"""
     return get_logger(name, level, structured=True)
+
+
+def log_domain_event(logger: logging.Logger, event: Mapping[str, Any]) -> None:
+    """Best-effort structured event logging that can never escape to callers."""
+    try:
+        logger.info(
+            "domain_event %s",
+            event.get("event_type", "unknown"),
+            extra={
+                "correlation_id": event.get("correlation_id", ""),
+                "event_type": event.get("event_type", "unknown"),
+            },
+        )
+    except Exception:  # noqa: BLE001 - logging must never affect trading
+        return
 
 
 def suppress_third_party_logs():
