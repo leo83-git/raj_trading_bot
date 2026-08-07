@@ -71,7 +71,9 @@ class EnsembleValidationService:
         self.config = config or {}
         self.min_confidence = _safe_float(self.config.get("min_confidence"), 0.08)
         self.min_consensus = _safe_float(self.config.get("min_consensus"), 0.5)
-        self.max_conflict_gap = _safe_float(self.config.get("max_conflict_gap"), 0.25)
+        self.min_evidence_score = _safe_float(
+            self.config.get("min_evidence_score"), 0.25
+        )
 
     def validate(
         self,
@@ -101,10 +103,11 @@ class EnsembleValidationService:
             rejected = True
             reasons.append("low_consensus")
         if market_direction == "NEUTRAL" and signal in {"BUY", "SELL"}:
+            rejected = True
             reasons.append("neutral_market")
         if (
             evidence_score is not None
-            and abs(evidence_score) < self.max_conflict_gap
+            and abs(evidence_score) < self.min_evidence_score
             and signal != "HOLD"
         ):
             reasons.append("conflicting_evidence")
@@ -149,6 +152,12 @@ class FnoFeatureScorer:
         self.min_price = _safe_float(self.thresholds.get("min_price"), 10)
         self.category_thresholds = self.config.get("p3_thresholds", {})
 
+    def _category_threshold(self, category: str, key: str, default: float) -> float:
+        return _safe_float(
+            self.category_thresholds.get(category, {}).get(key),
+            default,
+        )
+
     def score(self, stock: dict[str, Any]) -> dict[str, Any]:
         symbol = str(stock.get("symbol", "")).upper().strip()
         category = str(stock.get("category", "intraday")).lower()
@@ -170,13 +179,19 @@ class FnoFeatureScorer:
 
         oi = _safe_float(features.get("open_interest"))
         pcr = _safe_float(features.get("pcr"), 0.0)
-        iv = _safe_float(features.get("iv"), 0.0)
-        spread = _safe_float(features.get("spread_pct"), 0.0)
+        iv_source = features.get("iv")
+        if iv_source is None:
+            iv_source = stock.get("iv")
+        iv = _safe_float(iv_source, 0.0)
+        spread_raw = features.get("spread_pct")
+        spread = _safe_float(spread_raw, 0.0)
         liquidity = _safe_float(features.get("liquidity_score"), 0.0)
         volume = _safe_float(features.get("relative_volume"), 0.0)
         momentum = _safe_float(features.get("momentum_score"), 0.0)
         trend = str(features.get("trend", "SIDEWAYS")).upper()
         dte = features.get("dte")
+        buy_score = self._category_threshold(category, "buy_score", 0.55)
+        hold_floor = self._category_threshold(category, "hold_floor", 0.25)
 
         components.extend(
             [
@@ -203,10 +218,12 @@ class FnoFeatureScorer:
                 ),
                 ExplainableComponent(
                     "spread",
-                    max(0.0, 0.10 - spread * 0.02) if spread else 0.0,
+                    max(0.0, 0.10 - spread * 0.02)
+                    if spread_raw is not None
+                    else 0.0,
                     0.10,
                     spread,
-                    "Tight spread" if spread else "Missing spread",
+                    "Tight spread" if spread_raw is not None else "Missing spread",
                 ),
                 ExplainableComponent(
                     "liquidity",
@@ -255,10 +272,8 @@ class FnoFeatureScorer:
         )
 
         raw_score = sum(component.score for component in components)
-        if category == "fno":
-            raw_score += index_bonus
         confidence = min(0.95, max(0.0, raw_score))
-        signal = "BUY" if raw_score >= 0.55 else "SELL" if raw_score <= 0.25 else "HOLD"
+        signal = "BUY" if raw_score >= buy_score else "SELL" if raw_score <= hold_floor else "HOLD"
         return {
             "symbol": symbol,
             "category": category,
@@ -270,17 +285,20 @@ class FnoFeatureScorer:
 
 
 class CandidateRanker:
-    """Rank candidates by score with stable tie-breaking."""
+    """Rank candidates by score with stable tie-breaking.
+
+    The ranking mutates each caller-provided candidate dictionary by assigning
+    its `rank` field in the returned list.
+    """
 
     def rank(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ranked = sorted(
             candidates,
             key=lambda item: (
-                _safe_float(item.get("score"), 0.0),
-                _safe_float(item.get("confidence"), 0.0),
+                -_safe_float(item.get("score"), 0.0),
+                -_safe_float(item.get("confidence"), 0.0),
                 str(item.get("symbol", "")),
             ),
-            reverse=True,
         )
         for index, candidate in enumerate(ranked, start=1):
             candidate["rank"] = index

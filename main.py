@@ -127,6 +127,8 @@ except ImportError:
                 "SIDEWAYS",
                 "HIGH_VOLATILITY",
                 "LOW_VOLATILITY",
+                "BULLISH_BIAS",
+                "BEARISH_BIAS",
             }
             else "SIDEWAYS"
         )
@@ -244,13 +246,6 @@ def compute_ensemble_v2(
         "consensus": consensus,
         "signal": signal,
     }
-    validator = (
-        EnsembleValidationService({"min_confidence": 0.0, "min_consensus": 0.0})
-        if EnsembleValidationService
-        else None
-    )
-    if validator:
-        result["validation"] = validator.validate(result)
     return result
 
 
@@ -3147,9 +3142,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
 
             from tradingview_mcp.server import market_snapshot, yahoo_price
 
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=2, timeout=20
-            ) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 price_future = executor.submit(yahoo_price, symbol="AAPL")
                 snapshot_future = executor.submit(market_snapshot)
 
@@ -7329,9 +7322,17 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
         import time
 
         active_lock = self._tried_intraday_stocks_lock
-        market_direction = normalize_regime_vocabulary(
+        current_regime = normalize_regime_vocabulary(
             getattr(self, "current_regime", "NEUTRAL")
         )
+        if current_regime in {"SIDEWAYS", "MEAN_REVERTING"}:
+            market_direction = "NEUTRAL"
+        elif current_regime in {"TRENDING_UP", "BULLISH_BIAS"}:
+            market_direction = "BULLISH"
+        elif current_regime in {"TRENDING_DOWN", "BEARISH_BIAS"}:
+            market_direction = "BEARISH"
+        else:
+            market_direction = "NEUTRAL"
         # Set of known index symbols for eligibility checks in intraday pipeline.
         # This mirrors the definition used in the F&O pipeline and ensures the
         # variable is available when referenced later in the method.
@@ -7557,7 +7558,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                         if EnsembleValidationService
                         else None
                     )
-                    validation_result = (
+                    ensemble_validation_result = (
                         validation_service.validate(
                             ensemble_result,
                             market_direction=market_direction,
@@ -7576,14 +7577,31 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             "reasons": [],
                         }
                     )
-                    if validation_result.get("rejected"):
+                    if ensemble_validation_result.get("rejected"):
+                        if "conflicting_evidence" in ensemble_validation_result.get(
+                            "reasons", []
+                        ):
+                            log.info(
+                                f"Ensemble validation rejected {symbol} due to conflicting_evidence: "
+                                f"score={ensemble_result['score']:.3f}, consensus={ensemble_result['consensus']:.2f}, "
+                                f"confidence={ensemble_result['confidence']:.3f}"
+                            )
+                        if "low_consensus" in ensemble_validation_result.get(
+                            "reasons", []
+                        ):
+                            log.info(
+                                f"Ensemble validation rejected {symbol} due to low_consensus: "
+                                f"score={ensemble_result['score']:.3f}, consensus={ensemble_result['consensus']:.2f}"
+                            )
                         return {
                             "processed": False,
                             "symbol": symbol,
                             "category": category,
                             "result": {
                                 "error": "ensemble_validation_rejected",
-                                "reasons": validation_result.get("reasons", []),
+                                "reasons": ensemble_validation_result.get(
+                                    "reasons", []
+                                ),
                             },
                             "suggestion": {},
                         }
@@ -7598,7 +7616,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             "category": category,
                             "result": {
                                 "error": "hold_signal_not_convertible",
-                                "validation": validation_result,
+                                "validation": ensemble_validation_result,
                             },
                             "suggestion": {},
                         }
@@ -7626,9 +7644,11 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                         else getattr(model_pred, "signal", ensemble_result["signal"])
                     )
                     model_pred.confidence = model_confidence
-                    if validation_result:
+                    if ensemble_validation_result:
                         model_pred.metadata = getattr(model_pred, "metadata", {})
-                        model_pred.metadata["ensemble_validation"] = validation_result
+                        model_pred.metadata[
+                            "ensemble_validation"
+                        ] = ensemble_validation_result
                         if shadow_result:
                             model_pred.metadata["shadow_compare"] = shadow_result
 
@@ -8925,7 +8945,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
 
                 # Check if multi-leg F&O strategies are enabled before logging or branching on them.
                 multi_leg_enabled = self.config.get("options_strategies", {}).get(
-                    "multi_leg_enabled", True
+                    "multi_leg_enabled", False
                 )
 
                 log.info(

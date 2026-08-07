@@ -1,16 +1,35 @@
 # ═══════════════════════════════════════════════════════════════
 #  Screener Engine — Stock screening with multiple criteria
 # ═══════════════════════════════════════════════════════════════
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, List, Optional
-
 from quant_utils.logger import get_logger
-from screener.engine.p3_components import (INDEX_SYMBOLS, CandidateRanker,
-                                           FnoFeatureScorer)
+from screener.engine.p3_components import (
+    INDEX_SYMBOLS,
+    CandidateRanker,
+    FnoFeatureScorer,
+)
 
 log = get_logger("screener.engine")
+
+BASIC_FNO_SYMBOLS = INDEX_SYMBOLS.union(
+    {
+        "RELIANCE",
+        "HDFCBANK",
+        "ICICIBANK",
+        "TCS",
+        "INFY",
+        "SBIN",
+        "KOTAKBANK",
+        "AXISBANK",
+        "LT",
+        "HINDUNILVR",
+        "MARUTI",
+        "SUNPHARMA",
+        "BAJFINANCE",
+        "ITC",
+        "BHARTIARTL",
+    }
+)
 
 
 @dataclass
@@ -224,7 +243,9 @@ class ScreenerEngine:
         self.relative_strength = RelativeStrength()
         self.breakout = BreakoutDetector()
         self.oi_analyzer = OIAnalyzer()
-        self.p3_scorer = FnoFeatureScorer(self.config)
+        self.p3_scorer = FnoFeatureScorer(
+            self.config.get("root_config", self.config)
+        )
         self.p3_ranker = CandidateRanker()
 
         # Data provider for lazy loading (optional)
@@ -290,25 +311,7 @@ class ScreenerEngine:
 
     def _passes_basic_fno_filters(self, symbol: str) -> bool:
         """Basic F&O eligibility filters that don't require price data"""
-        return bool(symbol) and symbol.upper() in INDEX_SYMBOLS.union(
-            {
-                "RELIANCE",
-                "HDFCBANK",
-                "ICICIBANK",
-                "TCS",
-                "INFY",
-                "SBIN",
-                "KOTAKBANK",
-                "AXISBANK",
-                "LT",
-                "HINDUNILVR",
-                "MARUTI",
-                "SUNPHARMA",
-                "BAJFINANCE",
-                "ITC",
-                "BHARTIARTL",
-            }
-        )
+        return bool(symbol) and symbol.upper() in BASIC_FNO_SYMBOLS
 
     def _liquidity_filter(self, stocks: list[StockData]) -> list[StockData]:
         """Apply liquidity screening to stock list"""
@@ -613,7 +616,9 @@ class ScreenerEngine:
         # Apply enhanced AI scoring for F&O
         results = []
         for stock in initial_candidates:
-            scored = self.p3_scorer.score(self._stock_to_dict(stock))
+            scored = self.p3_scorer.score(
+                {**self._stock_to_dict(stock), "category": "fno"}
+            )
             scored["features"] = stock.features
             scored["price"] = stock.price
             scored["volume"] = stock.volume
@@ -625,7 +630,12 @@ class ScreenerEngine:
 
     def _calculate_enhanced_fno_score(self, stock: StockData) -> float:
         """Calculate enhanced F&O score based on multiple factors"""
-        return round(self.p3_scorer.score(self._stock_to_dict(stock))["score"], 2)
+        return round(
+            self.p3_scorer.score({**self._stock_to_dict(stock), "category": "fno"})[
+                "score"
+            ],
+            2,
+        )
 
     def _calculate_score(self, stock: StockData, method: str) -> float:
         """Calculate stock score based on method"""
