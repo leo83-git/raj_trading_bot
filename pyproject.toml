@@ -15,3 +15,5 @@ filterwarnings = [
   "error::DeprecationWarning",
 ]
 
+[tool.black]
+target-version = ["py312"]

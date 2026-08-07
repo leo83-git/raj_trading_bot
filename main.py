@@ -6,6 +6,7 @@
 # ═══════════════════════════════════════════════════════════════
 import asyncio  # Added to enable async pipeline execution
 import datetime
+import json
 import os
 import signal
 import sys
@@ -17,13 +18,14 @@ import time
 # ``NameError`` when the ``datetime`` module is mocked in tests.
 from datetime import time as dt_time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
 from core.order_manager import OrderManager
 from core.position_tracker import PositionTracker
 from core.risk_manager import RiskManager
+
 
 # ---------------------------------------------------------------------
 # Minimal PriceCache implementation
@@ -107,16 +109,30 @@ except ImportError:
 
 # Import regime normalization from the canonical vocabulary module
 try:
-    from intelligence.regime.vocabulary import normalize_regime as normalize_regime_vocabulary
+    from intelligence.regime.vocabulary import (
+        normalize_regime as normalize_regime_vocabulary,
+    )
 except ImportError:
     # Fallback if regime module unavailable
-    def normalize_regime_vocabulary(regime: Optional[str]) -> str:
+    def normalize_regime_vocabulary(regime: str | None) -> str:
         if regime is None:
             return "SIDEWAYS"
-        return regime.strip().upper() if regime.strip().upper() in {
-            "TRENDING_UP", "TRENDING_DOWN", "MEAN_REVERTING",
-            "SIDEWAYS", "HIGH_VOLATILITY", "LOW_VOLATILITY"
-        } else "SIDEWAYS"
+        return (
+            regime.strip().upper()
+            if regime.strip().upper()
+            in {
+                "TRENDING_UP",
+                "TRENDING_DOWN",
+                "MEAN_REVERTING",
+                "SIDEWAYS",
+                "HIGH_VOLATILITY",
+                "LOW_VOLATILITY",
+                "BULLISH_BIAS",
+                "BEARISH_BIAS",
+            }
+            else "SIDEWAYS"
+        )
+
 
 # Global running flag used by tests to control the main loop execution.
 _running = True
@@ -145,43 +161,13 @@ try:
 except ImportError:
     StrategyPerformanceTracker = None
 try:
+    from screener.engine.p3_components import EnsembleValidationService
+except ImportError:
+    EnsembleValidationService = None
+try:
     from intelligence.news_calendar import NewsFilter
 except ImportError:
-    current_price = None
-    # Determine if the symbol represents an option (e.g., RELIANCE2500CE).
-    import re
-
-    match = re.search(r"^([A-Z]+)(\d+)(CE|PE)$", symbol)
-    if match:
-        # Option price logic – fetch LTP from the option chain.
-        underlying = match.group(1)
-        chain = self._get_option_chain_with_fallback(underlying)
-        if chain:
-            data = chain.get("data", {})
-            records = data.get("records", {}) if isinstance(data, dict) else {}
-            options_list = records.get("data", []) if isinstance(records, dict) else []
-            strike = int(match.group(2))
-            opt_type = match.group(3)
-            for opt in options_list:
-                if opt.get("strikePrice") == strike:
-                    opt_data = opt.get(opt_type, {})
-                    current_price = (
-                        opt_data.get("lastPrice") or opt_data.get("LTP") or 0
-                    )
-                    break
-    else:
-        # Stock symbols: attempt to fetch a quote via the data provider.
-        if getattr(self, "data_provider", None):
-            quote = self.data_provider.get_quote(symbol)
-            if quote:
-                current_price = quote.get("last_price", 0)
-        if current_price is None:
-            # Fallback to the patchable price helper.
-            price_info = self._get_current_price(symbol)
-            if isinstance(price_info, (list, tuple)):
-                current_price = price_info[0]
-            else:
-                current_price = price_info
+    NewsFilter = None
 
 
 def compute_ensemble_score(
@@ -206,17 +192,8 @@ def compute_ensemble_score(
     """
     if ml_score is None:
         return None
-
-    # Normalise omitted scores to zero.
-    if dl_score is None:
-        dl_score = 0.0
-    if rl_score is None:
-        rl_score = 0.0
-
-    # Return the *minimum* of the three scores. The test suite expects a
-    # zero‑score input to dominate the result (e.g. ``(0.0, 0.0, 0.5)`` should
-    # yield ``0.0``). Using ``min`` satisfies all existing expectations while
-    # preserving the ``None`` propagation behaviour for a missing ``ml_score``.
+    dl_score = 0.0 if dl_score is None else dl_score
+    rl_score = 0.0 if rl_score is None else rl_score
     return min(ml_score, dl_score, rl_score)
 
 
@@ -234,10 +211,6 @@ def compute_ensemble_v2(
     propagated – if any explicitly provided score is ``None`` the function
     returns ``None`` to allow callers to handle missing data gracefully.
     """
-    # Treat ``None`` scores as ``0.0`` for calculation. The legacy ``compute_ensemble_score``
-    # propagates ``None`` as a return value, but the v2 variant is expected to always
-    # return a dictionary, even when inputs are ``None``. This mirrors the test suite's
-    # expectations.
     ml_score = 0.0 if ml_score is None else ml_score
     dl_score = 0.0 if dl_score is None else dl_score
     rl_score = 0.0 if rl_score is None else rl_score
@@ -267,13 +240,13 @@ def compute_ensemble_v2(
     signal = "HOLD"
     if abs(ensemble) > 0.05:
         signal = "BUY" if ensemble > 0 else "SELL"
-
-    return {
+    result = {
         "score": ensemble,
         "confidence": confidence,
         "consensus": consensus,
         "signal": signal,
     }
+    return result
 
 
 def load_config(config_path=None):
@@ -302,124 +275,6 @@ def load_config(config_path=None):
     except Exception as e:
         log.error(f"Failed to load configuration: {e}")
         return {}
-        if not broker:
-            log.warning("No broker available – cannot fetch market snapshot.")
-            return
-
-        # -----------------------------------------------------------------
-        # Ensure the access token is valid before any WebSocket work.
-        # -----------------------------------------------------------------
-        try:
-            # ``connect`` performs a lightweight profile call and (re)starts the
-            # WebSocket if the token is good. It also refreshes the token via the
-            # token manager when needed.
-            if not broker.connect():
-                log.error("Broker connection failed – aborting snapshot.")
-                return
-        except Exception as e:
-            log.error(f"Broker validation raised an exception: {e}")
-            # Attempt a hard reset: clear the stored token and retry.
-            try:
-                token_file = broker.token_manager._token_file_path
-                import os
-
-                if os.path.exists(token_file):
-                    os.remove(token_file)
-                    log.info("Removed stale token file to force re‑auth.")
-                broker.access_token = None
-                if not broker.connect():
-                    log.error("Broker still failed after token reset – aborting.")
-                    return
-            except Exception as ee:
-                log.error(f"Failed to reset token: {ee}")
-                return
-
-        # -----------------------------------------------------------------
-        # Primary path – use Zerodha WebSocket (full mode) for fast batch quotes.
-        # -----------------------------------------------------------------
-        ws = getattr(broker, "websocket", None)
-        if not ws:
-            # Some wrappers expose the inner Zerodha broker under ``zerodha_broker``.
-            inner = getattr(broker, "zerodha_broker", None)
-            ws = getattr(inner, "websocket", None) if inner else None
-        if ws:
-            try:
-                max_per_conn = 2500
-
-                def _chunks(lst, n):
-                    for i in range(0, len(lst), n):
-                        yield lst[i : i + n]
-
-                # Resolve tokens once using the wrapper broker, which lazily creates the core broker if needed.
-                symbol_token_map = {
-                    sym: broker.get_instrument_token("NSE", sym)
-                    for sym in symbols
-                    if broker.get_instrument_token("NSE", sym)
-                }
-                token_chunks = list(
-                    _chunks(list(symbol_token_map.values()), max_per_conn)
-                )
-                while len(token_chunks) < 3:
-                    token_chunks.append([])
-
-                total_fetched = 0
-                import concurrent.futures
-
-                from core.zerodha_websocket import ZerodhaWebSocket
-
-                def _process_chunk(chunk: list) -> int:
-                    if not chunk:
-                        return 0
-                    # Use the broker's current credentials, which may have been refreshed.
-                    # ``broker.api_key`` holds the API key, and ``broker.access_token`` is
-                    # updated via ``ZerodhaBroker.update_token`` when the WebSocket
-                    # refreshes the token. Falling back to ``broker.config`` could use a
-                    # stale token, leading to handshake failures.
-                    ws_conn = ZerodhaWebSocket(
-                        api_key=broker.api_key,
-                        access_token=broker.access_token,
-                    )
-                    ws_conn.connect()
-                    try:
-                        ws_conn.subscribe(chunk)
-                        return len(chunk)
-                    finally:
-                        ws_conn.disconnect()
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                    futures = [
-                        executor.submit(_process_chunk, ch) for ch in token_chunks
-                    ]
-                    for f in concurrent.futures.as_completed(futures):
-                        total_fetched += f.result()
-
-                log.info(
-                    f"Fetched market snapshots for {total_fetched} symbols (WebSocket)."
-                )
-                return
-            except Exception as e:  # pragma: no cover – defensive
-                log.error(f"WebSocket snapshot failed: {e}")
-                # Continue to REST fallback.
-
-        # -----------------------------------------------------------------
-        # Fallback – use the broker's REST ``get_multiple_quotes`` method.
-        # -----------------------------------------------------------------
-        if hasattr(broker, "get_multiple_quotes"):
-            try:
-                batch_size = 500
-                total = 0
-                for i in range(0, len(symbols), batch_size):
-                    batch = symbols[i : i + batch_size]
-                    quotes = broker.get_multiple_quotes(batch)
-                    total += len(quotes)
-                log.info(f"Fetched market snapshots for {total} symbols (REST).")
-                return
-            except Exception as e:  # pragma: no cover – defensive
-                log.error(f"REST snapshot failed: {e}")
-
-        log.warning("Market snapshot could not be performed – no viable method.")
-    except Exception as exc:  # pragma: no cover – defensive
-        log.error(f"download_market_snapshots failed: {exc}")
 
     # ---------------------------------------------------------------------
     # Background refresh handling (optional)
@@ -803,7 +658,7 @@ class RajTradingBot:
             # updates and profit‑ladder operations, even when layer setup is
             # mocked out in tests.
             self._simulation_lock = threading.Lock()
-            
+
         # Update Managers with the simulation engine
         if hasattr(self, "order_manager"):
             self.order_manager.simulation = self.simulation
@@ -1006,7 +861,9 @@ class RajTradingBot:
                 market_close_time = dt.time(15, 20)
 
                 if market_time >= market_close_time:
-                    log.info(f"Market closing ({market_time}), squaring off all positions...")
+                    log.info(
+                        f"Market closing ({market_time}), squaring off all positions..."
+                    )
                     self._scheduler_stop_event.set()
                     self._close_all_positions()
                     self.generate_daily_report()
@@ -1027,9 +884,13 @@ class RajTradingBot:
                     try:
                         self._manage_positions()
                     except Exception as exc:
-                        log.exception("Position management failed in scheduler: %s", exc)
+                        log.exception(
+                            "Position management failed in scheduler: %s", exc
+                        )
                     finally:
-                        self._next_manage_due_monotonic = now_mono + self.manage_interval_seconds
+                        self._next_manage_due_monotonic = (
+                            now_mono + self.manage_interval_seconds
+                        )
 
                 if (
                     now_mono >= self._next_scan_due_monotonic
@@ -1041,7 +902,9 @@ class RajTradingBot:
                         self._run_trading_cycle,
                         scheduled_scan_only=True,
                     )
-                    self._next_scan_due_monotonic = now_mono + self.scan_interval_seconds
+                    self._next_scan_due_monotonic = (
+                        now_mono + self.scan_interval_seconds
+                    )
 
                 sleep_for = self.loop_sleep_seconds
                 if self._is_scan_in_progress():
@@ -2601,7 +2464,7 @@ class RajTradingBot:
 
         # Initialize simulation with capital from config
         self.simulation = SimulationEngine({"capital": capital})
-        
+
         if hasattr(self, "order_manager"):
             self.order_manager.simulation = self.simulation
         if hasattr(self, "position_tracker"):
@@ -2804,7 +2667,7 @@ class RajTradingBot:
                 action=action,
                 order_type="MARKET",
                 price=premium,
-                metadata=metadata
+                metadata=metadata,
             )
 
             if result and result.get("status") == "success":
@@ -3279,9 +3142,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
 
             from tradingview_mcp.server import market_snapshot, yahoo_price
 
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=2, timeout=20
-            ) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 price_future = executor.submit(yahoo_price, symbol="AAPL")
                 snapshot_future = executor.submit(market_snapshot)
 
@@ -3318,15 +3179,17 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                 )
 
             sentiment_ok = False
+            market_sentiment = globals().get("market_sentiment")
             try:
-                sentiment_future = executor.submit(
-                    market_sentiment, symbol="AAPL", category="all", limit=1
-                )
-                sentiment_test = sentiment_future.result(timeout=10)
-                sentiment_ok = (
-                    isinstance(sentiment_test, dict)
-                    and sentiment_test.get("sentiment") is not None
-                )
+                if callable(market_sentiment):
+                    sentiment_future = executor.submit(
+                        market_sentiment, symbol="AAPL", category="all", limit=1
+                    )
+                    sentiment_test = sentiment_future.result(timeout=10)
+                    sentiment_ok = (
+                        isinstance(sentiment_test, dict)
+                        and sentiment_test.get("sentiment") is not None
+                    )
             except Exception:
                 sentiment_ok = False
 
@@ -4664,7 +4527,10 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
 
             # SECONDARY: Market snapshot from MCP TradingView for global sentiment
             try:
-                if mcp_tradingview_market_snapshot:
+                mcp_tradingview_market_snapshot = globals().get(
+                    "mcp_tradingview_market_snapshot"
+                )
+                if callable(mcp_tradingview_market_snapshot):
                     snapshot = mcp_tradingview_market_snapshot()
                     if snapshot and "indices" in snapshot:
                         # Analyze global market sentiment with Indian market correlation
@@ -7282,7 +7148,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                     timeout = intraday_timeout if name == "intraday" else fno_timeout
                     result = await asyncio.wait_for(task, timeout=timeout)
                     results[name] = result
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     log.warning(
                         f"{name.upper()} pipeline timed out after {timeout} seconds"
                     )
@@ -7456,6 +7322,17 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
         import time
 
         active_lock = self._tried_intraday_stocks_lock
+        current_regime = normalize_regime_vocabulary(
+            getattr(self, "current_regime", "NEUTRAL")
+        )
+        if current_regime in {"SIDEWAYS", "MEAN_REVERTING"}:
+            market_direction = "NEUTRAL"
+        elif current_regime in {"TRENDING_UP", "BULLISH_BIAS"}:
+            market_direction = "BULLISH"
+        elif current_regime in {"TRENDING_DOWN", "BEARISH_BIAS"}:
+            market_direction = "BEARISH"
+        else:
+            market_direction = "NEUTRAL"
         # Set of known index symbols for eligibility checks in intraday pipeline.
         # This mirrors the definition used in the F&O pipeline and ensures the
         # variable is available when referenced later in the method.
@@ -7676,14 +7553,56 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                                 f"signal={signal_name}, confidence {before_confidence:.2f} -> {model_confidence:.2f}"
                             )
 
-                    # Validate ensemble consensus >= 50%
-                    min_consensus = 0.5
-                    if consensus < min_consensus:
+                    validation_service = (
+                        EnsembleValidationService(self.config.get("thresholds", {}))
+                        if EnsembleValidationService
+                        else None
+                    )
+                    ensemble_validation_result = (
+                        validation_service.validate(
+                            ensemble_result,
+                            market_direction=market_direction,
+                            model_confidence=model_confidence,
+                            evidence_score=ensemble_score,
+                            stale=False,
+                            low_confidence=model_confidence
+                            < self.config.get("thresholds", {}).get(
+                                "min_confidence", 0.08
+                            ),
+                        )
+                        if validation_service
+                        else {
+                            "signal": ensemble_result["signal"],
+                            "rejected": False,
+                            "reasons": [],
+                        }
+                    )
+                    if ensemble_validation_result.get("rejected"):
+                        if "conflicting_evidence" in ensemble_validation_result.get(
+                            "reasons", []
+                        ):
+                            log.info(
+                                f"Ensemble validation rejected {symbol} due to conflicting_evidence: "
+                                f"score={ensemble_result['score']:.3f}, consensus={ensemble_result['consensus']:.2f}, "
+                                f"confidence={ensemble_result['confidence']:.3f}"
+                            )
+                        if "low_consensus" in ensemble_validation_result.get(
+                            "reasons", []
+                        ):
+                            log.info(
+                                f"Ensemble validation rejected {symbol} due to low_consensus: "
+                                f"score={ensemble_result['score']:.3f}, consensus={ensemble_result['consensus']:.2f}"
+                            )
                         return {
                             "processed": False,
                             "symbol": symbol,
                             "category": category,
-                            "result": {"error": f"consensus_too_low_{consensus:.2f}"},
+                            "result": {
+                                "error": "ensemble_validation_rejected",
+                                "reasons": ensemble_validation_result.get(
+                                    "reasons", []
+                                ),
+                            },
                             "suggestion": {},
                         }
 
@@ -7691,29 +7610,33 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                         log.debug(
                             f"Ensemble HOLD for {symbol}: score={ensemble_result['score']:.3f} confidence={ensemble_result['confidence']:.3f} consensus={ensemble_result['consensus']:.2f}"
                         )
-                        if (
-                            model_confidence >= 0.70
-                            and abs(stock.get("price_change_1d", 0)) >= 0.8
-                        ):
-                            fallback_action = (
-                                "BUY" if stock.get("price_change_1d", 0) > 0 else "SELL"
-                            )
-                            fallback_entry = stock.get("close", stock.get("price", 0))
-                            model_pred.signal = fallback_action
-                            model_pred.confidence = model_confidence
-                            model_pred.metadata = getattr(model_pred, "metadata", {})
-                            model_pred.metadata["fallback_reason"] = "momentum_trend"
-                            log.info(
-                                f"Fallback momentum signal for {symbol}: {fallback_action} due to strong move and high confidence"
-                            )
-                        else:
-                            return {
-                                "processed": False,
-                                "symbol": symbol,
-                                "category": category,
-                                "result": {"error": "weak_ensemble_signal"},
-                                "suggestion": {},
-                            }
+                        return {
+                            "processed": False,
+                            "symbol": symbol,
+                            "category": category,
+                            "result": {
+                                "error": "hold_signal_not_convertible",
+                                "validation": ensemble_validation_result,
+                            },
+                            "suggestion": {},
+                        }
+
+                    shadow_result = (
+                        validation_service.shadow_compare(
+                            ensemble_result,
+                            {
+                                "signal": getattr(model_pred, "signal", "HOLD"),
+                                "score": model_confidence,
+                                "confidence": model_confidence,
+                            },
+                        )
+                        if validation_service
+                        else None
+                    )
+                    if shadow_result:
+                        log.info(
+                            f"Shadow compare for {symbol}: primary={shadow_result['primary_signal']} shadow={shadow_result['shadow_signal']} agreement={shadow_result['agreement']}"
+                        )
 
                     model_pred.signal = (
                         ensemble_result["signal"]
@@ -7721,6 +7644,13 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                         else getattr(model_pred, "signal", ensemble_result["signal"])
                     )
                     model_pred.confidence = model_confidence
+                    if ensemble_validation_result:
+                        model_pred.metadata = getattr(model_pred, "metadata", {})
+                        model_pred.metadata[
+                            "ensemble_validation"
+                        ] = ensemble_validation_result
+                        if shadow_result:
+                            model_pred.metadata["shadow_compare"] = shadow_result
 
                 except Exception as e:
                     return {
@@ -8032,7 +7962,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             action=signal_action,
                             order_type="MARKET",
                             price=entry_price,
-                            metadata=metadata
+                            metadata=metadata,
                         )
 
                         if result and result.get("status") == "success":
@@ -8329,180 +8259,6 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             if candidates:
                 return min(candidates, key=lambda item: item[0])[1]
             return None
-
-            def normalize_strike_price(value):
-                try:
-                    if value is None:
-                        return None
-                    return int(float(value))
-                except Exception:
-                    return None
-
-            def extract_option_symbol(option_side):
-                if isinstance(option_side, dict):
-                    return (
-                        option_side.get("tradingSymbol")
-                        or option_side.get("symbol")
-                        or option_side.get("identifier")
-                    )
-                return None
-
-            def find_option_symbol(
-                chain: dict, strike: int, opt_type: str, underlying: str
-            ):
-                """Find a valid option symbol for the given strike and type.
-
-                This version prefers **future expiries** (today or later) and, when
-                multiple contracts satisfy the strike/type, selects the **earliest
-                expiry** (i.e., the current‑month contract). It no longer fabricates
-                symbols with a hard‑coded placeholder expiry.
-                """
-                from datetime import datetime
-
-                options_list, _ = extract_option_chain_data(chain)
-                if not isinstance(options_list, list):
-                    return None
-
-                def _parse_expiry(expiry_str: str) -> datetime.date | None:
-                    """Parse common expiry formats into a ``date`` object.
-
-                    Returns ``None`` if parsing fails.
-                    """
-                    if not expiry_str:
-                        return None
-                    for fmt in ("%d%b%y", "%Y-%m-%d", "%d-%b-%y", "%d-%b-%Y"):
-                        try:
-                            return datetime.strptime(expiry_str.upper(), fmt).date()
-                        except Exception:
-                            continue
-                    return None
-
-                today = datetime.utcnow().date()
-
-                def _expiry_valid(expiry_str: str) -> bool:
-                    exp_date = _parse_expiry(expiry_str)
-                    return exp_date is not None and exp_date >= today
-
-                # Helper to extract a symbol from an option dict
-                def _symbol_from_opt(opt_dict: dict) -> str | None:
-                    side = (
-                        opt_dict.get(opt_type)
-                        or opt_dict.get(opt_type.lower())
-                        or opt_dict.get(opt_type.upper())
-                    )
-                    sym = extract_option_symbol(side)
-                    if sym:
-                        return sym
-                    if opt_dict.get("optionType") == opt_type:
-                        sym = extract_option_symbol(opt_dict)
-                        if sym:
-                            return sym
-                    fallback = (
-                        opt_dict.get("symbol")
-                        or opt_dict.get("tradingSymbol")
-                        or opt_dict.get("identifier")
-                    )
-                    if fallback and opt_dict.get("optionType") == opt_type:
-                        return fallback
-                    return None
-
-                # Gather all candidates that match strike & type and have a valid expiry
-                candidates: list[Tuple[dict, datetime.date]] = []
-                for opt in options_list:
-                    if not isinstance(opt, dict):
-                        continue
-                    strike_price = normalize_strike_price(
-                        opt.get("strikePrice")
-                        or opt.get("strike_price")
-                        or opt.get("strike")
-                    )
-                    if strike_price != strike:
-                        continue
-                    expiry_str = (
-                        opt.get("expiryDate")
-                        or opt.get("expiry_date")
-                        or opt.get("Expiry_Date")
-                    )
-                    if not _expiry_valid(expiry_str):
-                        continue
-                    expiry_date = _parse_expiry(expiry_str)
-                    if expiry_date:
-                        candidates.append((opt, expiry_date))
-
-                # If we have exact‑strike candidates, pick the one with the earliest expiry
-                if candidates:
-                    opt, _ = min(candidates, key=lambda pair: pair[1])
-                    sym = _symbol_from_opt(opt)
-                    if sym:
-                        return sym
-                    expiry_str = (
-                        opt.get("expiryDate")
-                        or opt.get("expiry_date")
-                        or opt.get("Expiry_Date")
-                    )
-                    if expiry_str:
-                        constructed = build_option_symbol(
-                            underlying, expiry_str, strike, opt_type
-                        )
-                        if constructed:
-                            return constructed
-
-                # No exact‑strike future contract – find the closest strike with a valid expiry
-                closest_opt = None
-                closest_strike = None
-                closest_diff = float("inf")
-                closest_expiry: datetime.date | None = None
-                for opt in options_list:
-                    if not isinstance(opt, dict):
-                        continue
-                    strike_price = normalize_strike_price(
-                        opt.get("strikePrice")
-                        or opt.get("strike_price")
-                        or opt.get("strike")
-                    )
-                    if strike_price is None:
-                        continue
-                    expiry_str = (
-                        opt.get("expiryDate")
-                        or opt.get("expiry_date")
-                        or opt.get("Expiry_Date")
-                    )
-                    if not _expiry_valid(expiry_str):
-                        continue
-                    expiry_date = _parse_expiry(expiry_str)
-                    if expiry_date is None:
-                        continue
-                    diff = abs(strike_price - strike)
-                    # Prefer smaller diff; if equal, prefer earlier expiry
-                    if diff < closest_diff or (
-                        diff == closest_diff
-                        and expiry_date < (closest_expiry or expiry_date)
-                    ):
-                        closest_diff = diff
-                        closest_strike = strike_price
-                        closest_opt = opt
-                        closest_expiry = expiry_date
-
-                if closest_opt:
-                    log.debug(
-                        f"Using closest strike {closest_strike} for requested {strike}"
-                    )
-                    sym = _symbol_from_opt(closest_opt)
-                    if sym:
-                        return sym
-                    expiry_str = (
-                        closest_opt.get("expiryDate")
-                        or closest_opt.get("expiry_date")
-                        or closest_opt.get("Expiry_Date")
-                    )
-                    if expiry_str:
-                        constructed = build_option_symbol(
-                            underlying, expiry_str, closest_strike, opt_type
-                        )
-                        if constructed:
-                            return constructed
-                # No suitable contract found
-                return None
 
         def get_chain_underlying(chain, quote_price):
             _, records = extract_option_chain_data(chain)
@@ -9187,6 +8943,11 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                     symbol, spot, iv, time_to_expiry, regime
                 )
 
+                # Check if multi-leg F&O strategies are enabled before logging or branching on them.
+                multi_leg_enabled = self.config.get("options_strategies", {}).get(
+                    "multi_leg_enabled", False
+                )
+
                 log.info(
                     f"F&O {symbol}: spot={spot:.1f}, iv={iv:.2f}, regime={regime}, signal={strategy_signal.action}, strategy={strategy_signal.strategy}, confidence={strategy_signal.confidence:.3f}, iv_percentile={strategy_signal.iv_percentile:.1f}, rationale='{strategy_signal.rationale}'"
                 )
@@ -9259,11 +9020,6 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                     atm_strike = get_atm_strike_banknifty(spot)
                 else:
                     atm_strike = get_atm_strike(spot, 50)  # Default to 50 rupee steps
-
-                # Check if multi-leg F&O strategies are enabled
-                multi_leg_enabled = self.config.get("options_strategies", {}).get(
-                    "multi_leg_enabled", True
-                )
 
                 # Define multi-leg strategies that require multiple option legs
                 multi_leg_strategies = [
@@ -9425,7 +9181,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                         f"F&O pipeline candidate failed: {result.get('symbol')} reason={reason}"
                     )
                 return result
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 symbol = stock_item.get("symbol", "unknown")
                 log.warning(
                     f"F&O pipeline individual stock timed out for {symbol} after {task_timeout_per_stock} seconds"
@@ -9481,7 +9237,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             )
             for batch_result in completed_batches:
                 results.extend(batch_result)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 f"F&O pipeline (overall batch processing) timed out after {fno_timeout} seconds"
             )
@@ -9862,7 +9618,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                                 timeout=6.0,
                             )
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         log.debug(
                             f"Option chain fetch timed out for {underlying} - using fallback"
                         )
@@ -10478,8 +10234,6 @@ def download_market_snapshots(system: "RajTradingBot") -> None:
     # count to confirm the operation succeeded.
     # ---------------------------------------------------------------------
     try:
-        import sqlite3
-        from pathlib import Path
 
         # Resolve the SQLite DB used by the system (relative to the repo root).
         # The SQLite DB lives in the ``data`` directory *inside* the repository
