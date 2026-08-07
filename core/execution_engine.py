@@ -9,6 +9,7 @@ except Exception:
 
 log = logging.getLogger("execution_engine")
 
+
 class ExecutionEngine:
     """
     Orchestrates the lifecycle of the trading bot:
@@ -17,6 +18,7 @@ class ExecutionEngine:
     - Order management
     - Position tracking
     """
+
     def __init__(
         self,
         broker,
@@ -39,7 +41,9 @@ class ExecutionEngine:
                 self.db_manager = DatabaseManager()
                 log.info("DatabaseManager initialized for execution persistence")
             except Exception as exc:
-                log.debug(f"DatabaseManager unavailable for execution persistence: {exc}")
+                log.debug(
+                    f"DatabaseManager unavailable for execution persistence: {exc}"
+                )
 
         if hasattr(self.broker, "set_recovery_callback"):
             try:
@@ -56,7 +60,9 @@ class ExecutionEngine:
         the internal tracker is updated to match broker state.
         """
         if not self.broker or not hasattr(self.broker, "get_positions"):
-            log.warning("Skipping reconciliation: broker does not expose get_positions()")
+            log.warning(
+                "Skipping reconciliation: broker does not expose get_positions()"
+            )
             return
 
         if not self.position_tracker or not hasattr(
@@ -70,7 +76,9 @@ class ExecutionEngine:
         try:
             broker_positions = self.broker.get_positions() or []
         except Exception as exc:
-            log.error(f"Failed to fetch positions from broker during reconciliation: {exc}")
+            log.error(
+                f"Failed to fetch positions from broker during reconciliation: {exc}"
+            )
             return
 
         try:
@@ -116,9 +124,7 @@ class ExecutionEngine:
                 log.warning(
                     f"Position mismatch for {symbol}: broker={broker_pos}, internal={internal_pos}"
                 )
-                self._persist_log_event(
-                    "WARNING", f"Position mismatch for {symbol}"
-                )
+                self._persist_log_event("WARNING", f"Position mismatch for {symbol}")
 
         synced_positions = [broker_map[symbol] for symbol in sorted(broker_map)]
         self._sync_position_tracker(synced_positions)
@@ -159,7 +165,9 @@ class ExecutionEngine:
     def _sync_position_tracker(self, broker_positions: list[dict[str, Any]]) -> None:
         """Update internal tracker state to mirror broker positions."""
         if not hasattr(self.position_tracker, "positions"):
-            log.warning("position_tracker has no mutable positions store; reconciliation limited")
+            log.warning(
+                "position_tracker has no mutable positions store; reconciliation limited"
+            )
             return
 
         new_state: dict[str, dict[str, Any]] = {}
@@ -215,8 +223,9 @@ class ExecutionEngine:
     def start(self):
         """Start the execution engine loop"""
         log.info("Starting Execution Engine...")
-        self.is_running = True
+        self.is_running = False
         self.reconcile_state()
+        self.is_running = True
         self._run_loop()
 
     def stop(self):
@@ -229,14 +238,14 @@ class ExecutionEngine:
         while self.is_running:
             try:
                 # 1. Update positions & PnL
-                
+
                 # 2. Check risk limits (Circuit breakers)
-                
+
                 # 3. Poll Screeners & Strategies
-                
+
                 # 4. Execute Orders
-                
-                time.sleep(1) # Prevent high CPU usage
+
+                time.sleep(1)  # Prevent high CPU usage
             except Exception as e:
                 log.error(f"Error in execution loop: {e}")
                 time.sleep(5)

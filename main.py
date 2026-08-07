@@ -7,6 +7,7 @@
 import asyncio  # Added to enable async pipeline execution
 import datetime
 import json
+import math
 import os
 import signal
 import sys
@@ -29,6 +30,9 @@ from core.order_manager import OrderManager
 from core.position_tracker import PositionTracker
 from core.risk_manager import RiskManager
 from core.trade_validator import TradeValidator
+from execution.journal import ExecutionJournal
+from execution.models import ExecutionState
+from execution.multileg_coordinator import MultiLegCoordinator, OrderManagerAdapter
 
 
 # ---------------------------------------------------------------------
@@ -564,6 +568,23 @@ class RajTradingBot:
         )
         self.position_tracker = PositionTracker(self.broker)
         self.risk_manager = RiskManager(self.config)
+        self.multi_leg_coordinator = None
+        p6_config = self.config.get("execution", {}).get("p6_atomic_multileg", {})
+        if p6_config.get("enabled", False):
+            if self.mode != "PAPER":
+                log.warning(
+                    "P6 atomic multi-leg execution remains disabled in LIVE mode"
+                )
+            else:
+                journal_path = p6_config.get(
+                    "journal_path", "data/execution_journal.json"
+                )
+                self.multi_leg_coordinator = MultiLegCoordinator(
+                    OrderManagerAdapter(self.order_manager),
+                    ExecutionJournal(journal_path),
+                    mode=self.mode,
+                    max_retries=int(p6_config.get("max_retries", 1)),
+                )
 
         scheduler_config = self.config.get("scheduler", {})
         self.scheduler_enabled = bool(scheduler_config.get("enabled", False))
@@ -673,6 +694,9 @@ class RajTradingBot:
         if hasattr(self, "position_tracker"):
             self.position_tracker.simulation = self.simulation
             self.position_tracker.mode = self.mode
+        if self.multi_leg_coordinator is not None:
+            recovered = self.multi_leg_coordinator.recover_incomplete()
+            log.info("P6 restart recovery complete count=%s", len(recovered))
         self._watchlist_cycle_count = 0
 
         # Running flag – used by the main loop and tests. Default to True.
@@ -2555,6 +2579,55 @@ class RajTradingBot:
             if hasattr(self.broker, "get_lot_size")
             else index_lot_sizes.get(symbol, 25)
         )
+
+        if getattr(self, "multi_leg_coordinator", None) is not None:
+            atomic_legs = []
+            for leg in legs:
+                premium = leg.get("premium", leg.get("price"))
+                try:
+                    premium = float(premium)
+                except (TypeError, ValueError):
+                    premium = 0.0
+                if not math.isfinite(premium) or premium <= 0:
+                    return {
+                        "status": "error",
+                        "message": f"Missing resolved premium for {leg.get('symbol', '')}",
+                    }
+                atomic_legs.append(
+                    {
+                        **leg,
+                        "quantity": int(leg.get("quantity", lot_size) or lot_size),
+                        "price": float(premium),
+                    }
+                )
+            max_net_amount = signal_data.get("max_net_amount")
+            try:
+                max_net_amount = float(max_net_amount)
+            except (TypeError, ValueError):
+                max_net_amount = None
+            if max_net_amount is not None and not math.isfinite(max_net_amount):
+                max_net_amount = None
+            execution = self.multi_leg_coordinator.execute(
+                symbol,
+                strategy_name,
+                atomic_legs,
+                expected_net=str(signal_data.get("expected_net", "ANY")),
+                max_net_amount=max_net_amount,
+                client_ref=str(signal_data.get("client_ref", "")),
+            )
+            return {
+                "status": (
+                    "success"
+                    if execution.state is ExecutionState.COMPLETED
+                    else "failed"
+                ),
+                "strategy": strategy_name,
+                "strategy_id": execution.strategy_id,
+                "state": execution.state.value,
+                "net_cost": execution.actual_net_amount,
+                "failure_reason": execution.failure_reason,
+                "legs": [leg.raw for leg in execution.legs],
+            }
 
         total_cost = 0
         executed_legs = []
@@ -8391,12 +8464,13 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             except Exception:
                 return 18.0
 
-        def get_option_premium(chain, strike, opt_type):
+        def get_option_premium(chain, strike, opt_type, fallback=1.0):
             """Get option premium from chain data"""
             options_list, _ = extract_option_chain_data(chain)
             if not isinstance(options_list, list):
-                return 1.0  # Default fallback
+                return fallback
 
+            premium = None
             for opt in options_list:
                 if not isinstance(opt, dict):
                     continue
@@ -8420,11 +8494,11 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             or 0
                         )
             try:
-                return float(premium) if premium and premium > 0 else 1.0
+                return float(premium) if premium and premium > 0 else fallback
             except (ValueError, TypeError):
                 pass
 
-            return 1.0  # Default fallback premium
+            return fallback
 
         def calculate_adaptive_option_sl(
             premium: float, action: str, candles: list, use_atr: bool = True
@@ -8850,6 +8924,10 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                 ]
             else:
                 return None
+            for leg in legs:
+                leg["premium"] = get_option_premium(
+                    chain, leg["strike"], leg["opt_type"], fallback=None
+                )
             return legs
 
         def process_single_stock(stock):
