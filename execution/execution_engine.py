@@ -130,6 +130,10 @@ class ExecutionEngine:
 
         return {"status": "unknown"}
 
+    def reconcile_order(self, order_id: str) -> dict:
+        """Compatibility adapter: reconciliation is always required before retry."""
+        return self.get_order_status(order_id)
+
     def get_execution_stats(self) -> dict:
         """Get execution statistics"""
         total = len(self.order_history)

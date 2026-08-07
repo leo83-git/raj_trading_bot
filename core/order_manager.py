@@ -227,6 +227,49 @@ class OrderManager:
             log.error(f"Failed to cancel order: {e}")
             return False
 
+    def get_order_status(self, order_id: str) -> dict | None:
+        """Best-effort status lookup used by the P6 composition adapter."""
+        try:
+            if hasattr(self.broker, "get_order_status"):
+                return self.broker.get_order_status(order_id)
+            for order in self._order_history():
+                if str(order.get("order_id", order.get("id", ""))) == str(order_id):
+                    return order
+        except Exception as exc:  # noqa: BLE001 - broker reconciliation boundary
+            log.warning(
+                "order_status_reconciliation_failed order_id=%s error=%s", order_id, exc
+            )
+        return None
+
+    def find_order_by_idempotency_key(self, idempotency_key: str) -> dict | None:
+        """Find an already accepted paper order before an idempotent retry."""
+        try:
+            if hasattr(self.broker, "find_order_by_idempotency_key"):
+                return self.broker.find_order_by_idempotency_key(idempotency_key)
+            for order in self._order_history():
+                metadata = order.get("metadata", {}) if isinstance(order, dict) else {}
+                if (
+                    order.get("idempotency_key") == idempotency_key
+                    or metadata.get("idempotency_key") == idempotency_key
+                ):
+                    return order
+        except Exception as exc:  # noqa: BLE001 - broker reconciliation boundary
+            log.warning(
+                "idempotency_reconciliation_failed key=%s error=%s",
+                idempotency_key,
+                exc,
+            )
+        return None
+
+    def _order_history(self) -> list[dict]:
+        """Normalize common paper-broker order-history APIs."""
+        for name in ("get_order_history", "get_orders", "orders"):
+            value = getattr(self.broker, name, None)
+            result = value() if callable(value) else value
+            if isinstance(result, list):
+                return [item for item in result if isinstance(item, dict)]
+        return []
+
     def place_orders_concurrently(self, orders: list) -> list:
         """
         Execute multiple orders concurrently.

@@ -29,6 +29,9 @@ from core.order_manager import OrderManager
 from core.position_tracker import PositionTracker
 from core.risk_manager import RiskManager
 from core.trade_validator import TradeValidator
+from execution.journal import ExecutionJournal
+from execution.models import ExecutionState
+from execution.multileg_coordinator import MultiLegCoordinator, OrderManagerAdapter
 
 
 # ---------------------------------------------------------------------
@@ -564,6 +567,25 @@ class RajTradingBot:
         )
         self.position_tracker = PositionTracker(self.broker)
         self.risk_manager = RiskManager(self.config)
+        self.multi_leg_coordinator = None
+        p6_config = self.config.get("execution", {}).get("p6_atomic_multileg", {})
+        if p6_config.get("enabled", False):
+            if self.mode != "PAPER":
+                log.warning(
+                    "P6 atomic multi-leg execution remains disabled in LIVE mode"
+                )
+            else:
+                journal_path = p6_config.get(
+                    "journal_path", "data/execution_journal.json"
+                )
+                self.multi_leg_coordinator = MultiLegCoordinator(
+                    OrderManagerAdapter(self.order_manager),
+                    ExecutionJournal(journal_path),
+                    mode=self.mode,
+                    max_retries=int(p6_config.get("max_retries", 1)),
+                )
+                recovered = self.multi_leg_coordinator.recover_incomplete()
+                log.info("P6 restart recovery complete count=%s", len(recovered))
 
         scheduler_config = self.config.get("scheduler", {})
         self.scheduler_enabled = bool(scheduler_config.get("enabled", False))
@@ -2555,6 +2577,55 @@ class RajTradingBot:
             if hasattr(self.broker, "get_lot_size")
             else index_lot_sizes.get(symbol, 25)
         )
+
+        if getattr(self, "multi_leg_coordinator", None) is not None:
+            atomic_legs = []
+            for leg in legs:
+                try:
+                    premium = self._get_leg_option_premium(
+                        symbol,
+                        leg.get("strike", 0),
+                        leg.get("opt_type", leg.get("option_type", "")),
+                        leg.get("symbol", ""),
+                        chain,
+                    )
+                except Exception as exc:  # noqa: BLE001 - quote boundary
+                    log.warning(
+                        "P6 premium lookup failed symbol=%s error=%s",
+                        leg.get("symbol", ""),
+                        exc,
+                    )
+                    premium = None
+                if premium is None:
+                    premium = float(leg.get("strike", 0)) * 0.015
+                atomic_legs.append(
+                    {
+                        **leg,
+                        "quantity": int(leg.get("quantity", lot_size) or lot_size),
+                        "price": float(premium),
+                    }
+                )
+            execution = self.multi_leg_coordinator.execute(
+                symbol,
+                strategy_name,
+                atomic_legs,
+                expected_net=str(signal_data.get("expected_net", "ANY")),
+                max_net_amount=signal_data.get("max_net_amount"),
+                client_ref=str(signal_data.get("client_ref", "")),
+            )
+            return {
+                "status": (
+                    "success"
+                    if execution.state is ExecutionState.COMPLETED
+                    else "failed"
+                ),
+                "strategy": strategy_name,
+                "strategy_id": execution.strategy_id,
+                "state": execution.state.value,
+                "net_cost": execution.actual_net_amount,
+                "failure_reason": execution.failure_reason,
+                "legs": [leg.raw for leg in execution.legs],
+            }
 
         total_cost = 0
         executed_legs = []
