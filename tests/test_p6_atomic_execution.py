@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -47,6 +49,24 @@ class RaisingPaperBrokerFixture(PaperBrokerFixture):
     def submit(self, leg, *, compensation=False):
         self.events.append(("compensate" if compensation else "submit", leg.index))
         raise TimeoutError("paper broker timeout")
+
+
+class BlockingPaperBrokerFixture(PaperBrokerFixture):
+    def __init__(self):
+        super().__init__(submissions=[])
+        self.submitted = threading.Event()
+        self.release_submission = threading.Event()
+
+    def submit(self, leg, *, compensation=False):
+        self.events.append(("compensate" if compensation else "submit", leg.index))
+        self.submitted.set()
+        assert self.release_submission.wait(timeout=2)
+        return {
+            "status": "complete",
+            "filled_quantity": leg.quantity,
+            "average_price": leg.expected_price,
+            "order_id": "only-order",
+        }
 
 
 def _legs():
@@ -290,6 +310,51 @@ def test_fingerprint_includes_prices_and_net_constraints():
     )
 
     assert len({baseline, changed_price, changed_net}) == 3
+
+
+def test_integer_and_float_execution_limits_share_identity(tmp_path):
+    paper = PaperBrokerFixture(
+        submissions=[
+            {
+                "status": "complete",
+                "filled_quantity": 10,
+                "average_price": 10,
+            }
+        ]
+    )
+    coordinator = MultiLegCoordinator(
+        paper, ExecutionJournal(tmp_path / "journal.json")
+    )
+
+    integer_limit = coordinator.execute(
+        "NIFTY", "SINGLE", [_legs()[0]], max_net_amount=100
+    )
+    float_limit = coordinator.execute(
+        "NIFTY", "SINGLE", [_legs()[0]], max_net_amount=100.0
+    )
+
+    assert integer_limit.strategy_id == float_limit.strategy_id
+    assert integer_limit.max_net_amount == float_limit.max_net_amount == 100.0
+    assert paper.events == [("submit", 0)]
+
+
+def test_concurrent_duplicate_execution_has_single_submitter(tmp_path):
+    paper = BlockingPaperBrokerFixture()
+    journal_path = tmp_path / "journal.json"
+    first = MultiLegCoordinator(paper, ExecutionJournal(journal_path))
+    second = MultiLegCoordinator(paper, ExecutionJournal(journal_path))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        owner = executor.submit(first.execute, "NIFTY", "SINGLE", [_legs()[0]])
+        assert paper.submitted.wait(timeout=2)
+        observer = executor.submit(second.execute, "NIFTY", "SINGLE", [_legs()[0]])
+        observed = observer.result(timeout=2)
+        paper.release_submission.set()
+        completed = owner.result(timeout=2)
+
+    assert observed.strategy_id == completed.strategy_id
+    assert completed.state is ExecutionState.COMPLETED
+    assert paper.events == [("submit", 0)]
 
 
 def test_invalid_action_is_rejected_before_submission(tmp_path):

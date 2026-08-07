@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import ClassVar
 
 from execution.models import TERMINAL_STATES, StrategyExecution
 
@@ -20,9 +21,15 @@ class JournalCorruptionError(RuntimeError):
 class ExecutionJournal:
     """Persist the latest state using fsync plus atomic replacement."""
 
+    _registry_lock: ClassVar[threading.Lock] = threading.Lock()
+    _path_locks: ClassVar[dict[Path, threading.RLock]] = {}
+    _active_claims: ClassVar[dict[Path, set[str]]] = {}
+
     def __init__(self, path: str | Path):
-        self.path = Path(path)
-        self._lock = threading.RLock()
+        self.path = Path(path).resolve()
+        with self._registry_lock:
+            self._lock = self._path_locks.setdefault(self.path, threading.RLock())
+            self._claims = self._active_claims.setdefault(self.path, set())
 
     def _read(self) -> dict[str, dict]:
         if not self.path.exists():
@@ -45,18 +52,58 @@ class ExecutionJournal:
         with self._lock:
             records = self._read()
             records[execution.strategy_id] = self._safe_payload(execution.to_dict())
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-            with temporary.open("w", encoding="utf-8") as handle:
-                json.dump(records, handle, sort_keys=True, separators=(",", ":"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            directory_fd = os.open(self.path.parent, os.O_RDONLY)
+            self._write(records)
+
+    def claim(
+        self, execution: StrategyExecution
+    ) -> tuple[bool, StrategyExecution, bool]:
+        """Atomically claim one strategy for submission or recovery.
+
+        Returns ``(owned, observed_execution, created)``. Claims are process-local
+        and serialized per resolved journal path; durable execution state remains
+        in the journal so a restarted process can safely claim recovery.
+        """
+        with self._lock:
+            records = self._read()
+            strategy_id = execution.strategy_id
+            existing = (
+                self._deserialize(records[strategy_id], strategy_id)
+                if strategy_id in records
+                else None
+            )
+            if existing is not None and existing.state in TERMINAL_STATES:
+                return False, existing, False
+            if strategy_id in self._claims:
+                return False, existing or execution, False
+            self._claims.add(strategy_id)
+            if existing is not None:
+                return True, existing, False
+            records[strategy_id] = self._safe_payload(execution.to_dict())
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+                self._write(records)
+            except Exception:
+                self._claims.discard(strategy_id)
+                raise
+            return True, execution, True
+
+    def release(self, strategy_id: str) -> None:
+        """Release a process-local strategy claim after side effects finish."""
+        with self._lock:
+            self._claims.discard(strategy_id)
+
+    def _write(self, records: dict[str, dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(records, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.path)
+        directory_fd = os.open(self.path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     def get(self, strategy_id: str) -> StrategyExecution | None:
         with self._lock:

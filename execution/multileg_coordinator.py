@@ -9,7 +9,6 @@ from typing import Any, Protocol
 
 from execution.journal import ExecutionJournal
 from execution.models import (
-    TERMINAL_STATES,
     ExecutionState,
     LegExecution,
     LegState,
@@ -97,6 +96,9 @@ class MultiLegCoordinator:
         client_ref: str = "",
     ) -> StrategyExecution:
         normalized_expected_net = expected_net.upper()
+        normalized_max_net_amount = (
+            None if max_net_amount is None else float(max_net_amount)
+        )
         for leg in legs:
             original_action = leg.get("action", "BUY")
             normalized_action = str(original_action).upper()
@@ -109,21 +111,14 @@ class MultiLegCoordinator:
             legs,
             client_ref,
             normalized_expected_net,
-            max_net_amount,
+            normalized_max_net_amount,
         )
-        existing = self.journal.get(strategy_id)
-        if existing:
-            return (
-                existing
-                if existing.state in TERMINAL_STATES
-                else self._recover(existing)
-            )
         execution = StrategyExecution(
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             underlying=underlying,
             expected_net=normalized_expected_net,
-            max_net_amount=max_net_amount,
+            max_net_amount=normalized_max_net_amount,
             state=ExecutionState.CREATED,
             legs=[
                 LegExecution(
@@ -137,21 +132,38 @@ class MultiLegCoordinator:
                 for index, leg in enumerate(legs)
             ],
         )
-        self._save(execution)
-        if not legs or not self._net_valid(
-            self._net(execution, expected=True), execution
-        ):
-            execution.state = ExecutionState.FAILED
-            execution.failure_reason = "projected_net_validation_failed"
-            self._save(execution)
+        owned, execution, created = self.journal.claim(execution)
+        if not owned:
             return execution
-        execution.state = ExecutionState.VALIDATED
-        self._save(execution)
-        return self._submit_remaining(execution)
+        try:
+            if not created:
+                return self._recover(execution)
+            if not legs or not self._net_valid(
+                self._net(execution, expected=True), execution
+            ):
+                execution.state = ExecutionState.FAILED
+                execution.failure_reason = "projected_net_validation_failed"
+                self._save(execution)
+                return execution
+            execution.state = ExecutionState.VALIDATED
+            self._save(execution)
+            return self._submit_remaining(execution)
+        finally:
+            self.journal.release(strategy_id)
 
     def recover_incomplete(self) -> list[StrategyExecution]:
         """Reconcile journaled executions after restart before any resubmission."""
-        return [self._recover(item) for item in self.journal.incomplete()]
+        recovered = []
+        for item in self.journal.incomplete():
+            owned, observed, _ = self.journal.claim(item)
+            if not owned:
+                recovered.append(observed)
+                continue
+            try:
+                recovered.append(self._recover(observed))
+            finally:
+                self.journal.release(item.strategy_id)
+        return recovered
 
     def _recover(self, execution: StrategyExecution) -> StrategyExecution:
         execution.state = ExecutionState.RECONCILING

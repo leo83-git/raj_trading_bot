@@ -8464,12 +8464,13 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             except Exception:
                 return 18.0
 
-        def get_option_premium(chain, strike, opt_type):
+        def get_option_premium(chain, strike, opt_type, fallback=1.0):
             """Get option premium from chain data"""
             options_list, _ = extract_option_chain_data(chain)
             if not isinstance(options_list, list):
-                return 1.0  # Default fallback
+                return fallback
 
+            premium = None
             for opt in options_list:
                 if not isinstance(opt, dict):
                     continue
@@ -8493,11 +8494,11 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                             or 0
                         )
             try:
-                return float(premium) if premium and premium > 0 else 1.0
+                return float(premium) if premium and premium > 0 else fallback
             except (ValueError, TypeError):
                 pass
 
-            return 1.0  # Default fallback premium
+            return fallback
 
         def calculate_adaptive_option_sl(
             premium: float, action: str, candles: list, use_atr: bool = True
@@ -8925,7 +8926,7 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                 return None
             for leg in legs:
                 leg["premium"] = get_option_premium(
-                    chain, leg["strike"], leg["opt_type"]
+                    chain, leg["strike"], leg["opt_type"], fallback=None
                 )
             return legs
 
