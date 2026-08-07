@@ -7,6 +7,8 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from quant_utils.logger import get_logger
+from screener.engine.p3_components import (INDEX_SYMBOLS, CandidateRanker,
+                                           FnoFeatureScorer)
 
 log = get_logger("screener.engine")
 
@@ -222,6 +224,8 @@ class ScreenerEngine:
         self.relative_strength = RelativeStrength()
         self.breakout = BreakoutDetector()
         self.oi_analyzer = OIAnalyzer()
+        self.p3_scorer = FnoFeatureScorer(self.config)
+        self.p3_ranker = CandidateRanker()
 
         # Data provider for lazy loading (optional)
         self.data_provider = data_provider
@@ -286,34 +290,25 @@ class ScreenerEngine:
 
     def _passes_basic_fno_filters(self, symbol: str) -> bool:
         """Basic F&O eligibility filters that don't require price data"""
-        if not symbol:
-            return False
-
-        # F&O eligible symbols (major indices and liquid stocks)
-        fno_eligible_symbols = {
-            "NIFTY",
-            "BANKNIFTY",
-            "FINNIFTY",
-            "MIDCPNIFTY",
-            "NIFTYNXT50",
-            "RELIANCE",
-            "HDFCBANK",
-            "ICICIBANK",
-            "TCS",
-            "INFY",
-            "SBIN",
-            "KOTAKBANK",
-            "AXISBANK",
-            "LT",
-            "HINDUNILVR",
-            "MARUTI",
-            "SUNPHARMA",
-            "BAJFINANCE",
-            "ITC",
-            "BHARTIARTL",
-        }
-
-        return symbol.upper() in fno_eligible_symbols
+        return bool(symbol) and symbol.upper() in INDEX_SYMBOLS.union(
+            {
+                "RELIANCE",
+                "HDFCBANK",
+                "ICICIBANK",
+                "TCS",
+                "INFY",
+                "SBIN",
+                "KOTAKBANK",
+                "AXISBANK",
+                "LT",
+                "HINDUNILVR",
+                "MARUTI",
+                "SUNPHARMA",
+                "BAJFINANCE",
+                "ITC",
+                "BHARTIARTL",
+            }
+        )
 
     def _liquidity_filter(self, stocks: list[StockData]) -> list[StockData]:
         """Apply liquidity screening to stock list"""
@@ -445,9 +440,11 @@ class ScreenerEngine:
             try:
                 from analytics.performance import get_performance_analytics
                 from features.indicators import calculate_all_indicators
-                from features.microstructure import analyze_market_microstructure
+                from features.microstructure import \
+                    analyze_market_microstructure
                 from features.patterns import get_pattern_recognizer
-                from sources.institutional_data import get_institutional_provider
+                from sources.institutional_data import \
+                    get_institutional_provider
 
                 # Initialize components
                 institutional_provider = get_institutional_provider()
@@ -616,58 +613,19 @@ class ScreenerEngine:
         # Apply enhanced AI scoring for F&O
         results = []
         for stock in initial_candidates:
-            # Calculate comprehensive AI score
-            score = self._calculate_enhanced_fno_score(stock)
-            stock.score = score  # Add score to stock object
+            scored = self.p3_scorer.score(self._stock_to_dict(stock))
+            scored["features"] = stock.features
+            scored["price"] = stock.price
+            scored["volume"] = stock.volume
+            scored["change_pct"] = stock.change_pct
+            scored["screener_score"] = scored["score"]
+            results.append(scored)
 
-            # Convert to dict format for consistency
-            result_dict = self._stock_to_dict(stock)
-            result_dict["screener_score"] = score
-            results.append(result_dict)
-
-        # Sort by score and return top results
-        results.sort(key=lambda x: x.get("screener_score", 0), reverse=True)
-        return results
+        return self.p3_ranker.rank(results)
 
     def _calculate_enhanced_fno_score(self, stock: StockData) -> float:
         """Calculate enhanced F&O score based on multiple factors"""
-        score = 0.0
-
-        # F&O priority bonus for indices (they have special options logic)
-        if stock.symbol in ["NIFTY", "BANKNIFTY", "NIFTY50"]:
-            score += 10  # Priority for index trading
-
-        # Price momentum
-        if stock.change_pct:
-            score += stock.change_pct * 1.8
-
-        # RSI zone scoring (if available)
-        if stock.rsi:
-            if 55 <= stock.rsi <= 70:
-                score += 12
-            elif 50 <= stock.rsi < 55:
-                score += 6
-            elif stock.rsi > 75:
-                score -= 5
-
-        # Volume factor (indices have 0 volume, give them baseline)
-        if stock.symbol in ["NIFTY", "BANKNIFTY", "NIFTY50"]:
-            score += 1  # Baseline for indices
-        elif stock.volume > self.min_volume * 2:
-            score += 2
-        elif stock.volume > self.min_volume:
-            score += 1
-
-        # Trend bonus
-        if stock.trend == "UPTREND":
-            score += 5
-        elif stock.trend == "DOWNTREND":
-            score -= 3
-
-        # F&O specific bonuses (simplified)
-        # In a full implementation, this would include OI analysis, VWAP, EMA alignment, etc.
-
-        return round(score, 2)
+        return round(self.p3_scorer.score(self._stock_to_dict(stock))["score"], 2)
 
     def _calculate_score(self, stock: StockData, method: str) -> float:
         """Calculate stock score based on method"""

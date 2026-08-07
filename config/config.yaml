@@ -122,6 +122,16 @@ thresholds:
   # Minimum confidence required for a signal to be considered actionable.
   # Recommended range for intraday strategies is 0.05‑0.20.
   min_confidence: 0.08
+  min_consensus: 0.5
+  max_conflict_gap: 0.25
+
+p3_thresholds:
+  fno:
+    buy_score: 0.55
+    hold_floor: 0.25
+  intraday:
+    buy_score: 0.55
+    hold_floor: 0.25
 
 # -------------------------------------------------
 # Intraday screening thresholds
