@@ -2,11 +2,27 @@
 #  Alerts System (Telegram + Notifications)
 # ═══════════════════════════════════════════════════════════════
 
+import datetime as dt
+import threading
+import time
+from collections import deque
+from collections.abc import Callable
+from enum import IntEnum
+
 import requests
 
 from quant_utils.logger import get_logger
 
 log = get_logger("alerts")
+
+
+class AlertSeverity(IntEnum):
+    """Operational alert priority used for routing and suppression."""
+
+    INFO = 10
+    WARNING = 20
+    ERROR = 30
+    CRITICAL = 40
 
 
 class AlertManager:
@@ -21,8 +37,17 @@ class AlertManager:
         )
         self.chat_id = self.config.get("telegram_chat_id", "5510134387")
 
-        self.alert_history = []
+        self.alert_history: deque[dict] = deque(
+            maxlen=max(1, int(self.config.get("alert_history_maxlen", 1_000)))
+        )
         self.alert_counts = {"trade": 0, "error": 0, "risk": 0, "info": 0}
+        self.dedup_window_seconds = float(self.config.get("dedup_window_seconds", 300))
+        severity_name = str(self.config.get("minimum_severity", "INFO")).upper()
+        self.minimum_severity = AlertSeverity.__members__.get(
+            severity_name, AlertSeverity.INFO
+        )
+        self._last_alert: dict[str, float] = {}
+        self._lock = threading.Lock()
 
         log.info("Alert manager initialized")
 
@@ -30,15 +55,84 @@ class AlertManager:
         """Send message via Telegram"""
         if not self.enabled:
             return False
-
         try:
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
             data = {"chat_id": self.chat_id, "text": message, "parse_mode": parse_mode}
             response = requests.post(url, data=data, timeout=10)
             return response.status_code == 200
-        except Exception as e:
-            log.error(f"Telegram error: {e}")
+        except requests.RequestException as exc:
+            log.error("Telegram error: %s", exc)
             return False
+        except Exception:  # Formatting and mocked transports must remain fail-open.
+            log.exception("Unexpected Telegram delivery error")
+            return False
+
+    def send_alert(
+        self,
+        severity: AlertSeverity,
+        key: str,
+        message: str,
+        *,
+        correlation_id: str = "",
+        sender: Callable[[str], bool] | None = None,
+    ) -> bool:
+        """Send a severity-filtered, deduplicated alert without raising.
+
+        ``sender`` supports non-network transports in deployments and tests.
+        Duplicate keys are suppressed for ``dedup_window_seconds``; critical
+        alerts bypass suppression so emergency conditions remain visible.
+        """
+        try:
+            severity = AlertSeverity(severity)
+            if severity < self.minimum_severity:
+                return False
+            now = time.monotonic()
+            with self._lock:
+                previous = self._last_alert.get(key)
+                if (
+                    severity is not AlertSeverity.CRITICAL
+                    and previous is not None
+                    and now - previous < self.dedup_window_seconds
+                ):
+                    return False
+                self._last_alert[key] = now
+            prefix = f"[{severity.name}]"
+            if correlation_id:
+                prefix += f" [{correlation_id}]"
+            delivered = (sender or self.send_message)(f"{prefix} {message}")
+            self.alert_history.append(
+                {
+                    "type": "operational",
+                    "severity": severity.name,
+                    "key": key,
+                    "correlation_id": correlation_id,
+                    "timestamp": dt.datetime.now(dt.UTC).isoformat(),
+                    "delivered": bool(delivered),
+                }
+            )
+            return bool(delivered)
+        except Exception:  # Alert transports must not affect trading.
+            log.debug("P7 alert delivery failed", exc_info=True)
+            return False
+
+    def run_health_checks(
+        self, checks: dict[str, Callable[[], bool]]
+    ) -> dict[str, bool]:
+        """Run independent health probes; one broken probe cannot stop others."""
+        results: dict[str, bool] = {}
+        for name, check in checks.items():
+            try:
+                results[name] = bool(check())
+            except Exception:  # User-supplied probes are intentionally isolated.
+                results[name] = False
+                log.debug("P7 health check failed: %s", name, exc_info=True)
+            if not results[name]:
+                self.send_alert(
+                    AlertSeverity.ERROR,
+                    f"health:{name}",
+                    f"Health check failed: {name}",
+                )
+        return results
 
     def alert_trade(
         self,
@@ -140,7 +234,7 @@ class AlertManager:
         return {
             "total_alerts": len(self.alert_history),
             "counts": self.alert_counts,
-            "recent": self.alert_history[-10:],
+            "recent": list(self.alert_history)[-10:],
         }
 
     def set_enabled(self, enabled: bool):

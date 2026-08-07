@@ -17,3 +17,6 @@ filterwarnings = [
 
 [tool.black]
 target-version = ["py312"]
+
+[tool.isort]
+profile = "black"

@@ -193,3 +193,58 @@ RUN_LIVE_TESTS=1 /home/rajasekhar/vibe-coding/raj_trading_bot/.venv/bin/python -
         - Results may be flaky due to network latency, MCP availability, or NSE site changes.
         - The CI workflow runs unit tests on push/PR and can run this live test only when manually triggered with `run_live=true` or when `RUN_LIVE_TESTS=1` is set in the workflow environment.
 
+## P7 observability and release gates
+
+P7 adds typed, correlated events from scheduler/data fetch through data quality,
+screening, signal, risk, options selection, execution, P&L/drawdown/Greeks, and
+position exit. Events are bounded in memory. Only the compact execution recovery
+checkpoint is persisted. Telemetry is fail-open and must never be used as an
+order precondition.
+
+Enable only for non-live evaluation:
+
+```yaml
+observability:
+  p7:
+    enabled: true
+    max_events: 2000
+```
+
+Live trading remains disabled. Promotion requires these gates in order:
+
+1. **Shadow:** at least five market sessions with correlation continuity from
+   fetch to terminal outcome, no telemetry-induced trading exceptions, healthy
+   data/broker/database probes, and bounded memory.
+2. **Paper comparison:** replay identical inputs through telemetry off/on and
+   confirm identical signals, risk decisions, orders, exits, and P&L (allowing
+   only timestamps/event IDs to differ).
+3. **Paper execution:** at least five sessions with execution reconciliation,
+   alert deduplication, daily reports, and restart recovery drills passing.
+4. **Soak:** at least one full continuous market week without an unbounded event
+   buffer, blocked trading thread, alert storm, or missing terminal correlation.
+5. **Restricted live:** separate human approval, smallest permitted capital and
+   symbols, paper-tested broker credentials, live kill switch, and an operator
+   watching health and reconciliation. Approval also requires a completed
+   rollback drill with its evidence recorded before sign-off. P7 itself does not
+   enable live mode.
+
+### Independent rollback
+
+Set `observability.p7.enabled` to `false` and restart the process. This disables
+P7 emission without reverting scheduler, data, screening, risk, options, or
+execution components. Confirm broker positions independently, preserve logs and
+the current recovery checkpoint for investigation, and verify the legacy loop's
+health before resuming paper operation. A code rollback can then revert only the
+P7 commit.
+
+### Emergency flatten
+
+Disable every entry gate and stop new scheduling first. Cancel or await the
+active cycle and all in-flight entry tasks before invoking the tested
+execution/broker close-all path. Reconcile every order and position directly
+with the broker. Retry only after reconciliation proves an order absent; never
+infer broker state from a missing telemetry event. Record unresolved/ambiguous
+orders and correlation IDs, keep further entry disabled, and escalate to manual
+broker flatten if the automated path cannot prove the account flat. Confirm zero
+broker positions before clearing the recovery checkpoint. Alert delivery is
+advisory and must not delay flattening.
