@@ -220,22 +220,12 @@ class ExecutionEngine:
         log.warning("WebSocket disconnect detected; reconciling state")
         self.reconcile_state()
 
-    def recover_multi_leg_executions(self) -> list[Any]:
-        """Recover journaled P6 work when an opt-in coordinator is attached."""
-        coordinator = getattr(self, "multi_leg_coordinator", None)
-        if coordinator is None:
-            return []
-        if str(self.config.get("mode", "PAPER")).upper() != "PAPER":
-            log.warning("P6 recovery skipped because live execution is disabled")
-            return []
-        return coordinator.recover_incomplete()
-
     def start(self):
         """Start the execution engine loop"""
         log.info("Starting Execution Engine...")
-        self.is_running = True
+        self.is_running = False
         self.reconcile_state()
-        self.recover_multi_leg_executions()
+        self.is_running = True
         self._run_loop()
 
     def stop(self):

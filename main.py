@@ -7,6 +7,7 @@
 import asyncio  # Added to enable async pipeline execution
 import datetime
 import json
+import math
 import os
 import signal
 import sys
@@ -584,8 +585,6 @@ class RajTradingBot:
                     mode=self.mode,
                     max_retries=int(p6_config.get("max_retries", 1)),
                 )
-                recovered = self.multi_leg_coordinator.recover_incomplete()
-                log.info("P6 restart recovery complete count=%s", len(recovered))
 
         scheduler_config = self.config.get("scheduler", {})
         self.scheduler_enabled = bool(scheduler_config.get("enabled", False))
@@ -695,6 +694,9 @@ class RajTradingBot:
         if hasattr(self, "position_tracker"):
             self.position_tracker.simulation = self.simulation
             self.position_tracker.mode = self.mode
+        if self.multi_leg_coordinator is not None:
+            recovered = self.multi_leg_coordinator.recover_incomplete()
+            log.info("P6 restart recovery complete count=%s", len(recovered))
         self._watchlist_cycle_count = 0
 
         # Running flag – used by the main loop and tests. Default to True.
@@ -2581,23 +2583,16 @@ class RajTradingBot:
         if getattr(self, "multi_leg_coordinator", None) is not None:
             atomic_legs = []
             for leg in legs:
+                premium = leg.get("premium", leg.get("price"))
                 try:
-                    premium = self._get_leg_option_premium(
-                        symbol,
-                        leg.get("strike", 0),
-                        leg.get("opt_type", leg.get("option_type", "")),
-                        leg.get("symbol", ""),
-                        chain,
-                    )
-                except Exception as exc:  # noqa: BLE001 - quote boundary
-                    log.warning(
-                        "P6 premium lookup failed symbol=%s error=%s",
-                        leg.get("symbol", ""),
-                        exc,
-                    )
-                    premium = None
-                if premium is None:
-                    premium = float(leg.get("strike", 0)) * 0.015
+                    premium = float(premium)
+                except (TypeError, ValueError):
+                    premium = 0.0
+                if not math.isfinite(premium) or premium <= 0:
+                    return {
+                        "status": "error",
+                        "message": f"Missing resolved premium for {leg.get('symbol', '')}",
+                    }
                 atomic_legs.append(
                     {
                         **leg,
@@ -2605,12 +2600,19 @@ class RajTradingBot:
                         "price": float(premium),
                     }
                 )
+            max_net_amount = signal_data.get("max_net_amount")
+            try:
+                max_net_amount = float(max_net_amount)
+            except (TypeError, ValueError):
+                max_net_amount = None
+            if max_net_amount is not None and not math.isfinite(max_net_amount):
+                max_net_amount = None
             execution = self.multi_leg_coordinator.execute(
                 symbol,
                 strategy_name,
                 atomic_legs,
                 expected_net=str(signal_data.get("expected_net", "ANY")),
-                max_net_amount=signal_data.get("max_net_amount"),
+                max_net_amount=max_net_amount,
                 client_ref=str(signal_data.get("client_ref", "")),
             )
             return {
@@ -8921,6 +8923,10 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
                 ]
             else:
                 return None
+            for leg in legs:
+                leg["premium"] = get_option_premium(
+                    chain, leg["strike"], leg["opt_type"]
+                )
             return legs
 
         def process_single_stock(stock):

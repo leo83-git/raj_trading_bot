@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -95,7 +96,21 @@ class MultiLegCoordinator:
         max_net_amount: float | None = None,
         client_ref: str = "",
     ) -> StrategyExecution:
-        strategy_id = strategy_fingerprint(underlying, strategy_name, legs, client_ref)
+        normalized_expected_net = expected_net.upper()
+        for leg in legs:
+            original_action = leg.get("action", "BUY")
+            normalized_action = str(original_action).upper()
+            if normalized_action not in {"BUY", "SELL"}:
+                raise ValueError(f"Unsupported leg action: {original_action!r}")
+            leg["action"] = normalized_action
+        strategy_id = strategy_fingerprint(
+            underlying,
+            strategy_name,
+            legs,
+            client_ref,
+            normalized_expected_net,
+            max_net_amount,
+        )
         existing = self.journal.get(strategy_id)
         if existing:
             return (
@@ -107,7 +122,7 @@ class MultiLegCoordinator:
             strategy_id=strategy_id,
             strategy_name=strategy_name,
             underlying=underlying,
-            expected_net=expected_net.upper(),
+            expected_net=normalized_expected_net,
             max_net_amount=max_net_amount,
             state=ExecutionState.CREATED,
             legs=[
@@ -179,6 +194,13 @@ class MultiLegCoordinator:
         return self._complete_or_flatten(execution)
 
     def _complete_or_flatten(self, execution: StrategyExecution) -> StrategyExecution:
+        if any(
+            leg.state is LegState.FILLED
+            and leg.filled_quantity > 0
+            and leg.average_price <= 0
+            for leg in execution.legs
+        ):
+            return self._compensate(execution, "actual_net_validation_failed")
         execution.actual_net_amount = self._net(execution)
         if not self._net_valid(execution.actual_net_amount, execution):
             return self._compensate(execution, "actual_net_validation_failed")
@@ -308,14 +330,34 @@ class MultiLegCoordinator:
             "pending": "ambiguous",
         }
         status = mapping.get(raw_status, raw_status)
-        quantity = int(
+        raw_quantity = (
             result.get("filled_quantity", result.get("quantity", result.get("qty", 0)))
             or 0
         )
-        price = float(result.get("average_price", result.get("price", 0)) or 0)
+        raw_price = result.get("average_price", result.get("price", 0)) or 0
+        try:
+            numeric_quantity = float(raw_quantity)
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            return "ambiguous", 0, 0.0, None
+        if (
+            not numeric_quantity.is_integer()
+            or numeric_quantity < 0
+            or not math.isfinite(numeric_quantity)
+            or not math.isfinite(price)
+        ):
+            return "ambiguous", 0, 0.0, None
+        quantity = int(numeric_quantity)
         order_id = result.get("order_id", result.get("id"))
         if status == "filled" and quantity == 0:
-            quantity = int(result.get("requested_quantity", 0) or 0)
+            raw_requested = result.get("requested_quantity", 0) or 0
+            try:
+                numeric_requested = float(raw_requested)
+            except (TypeError, ValueError):
+                return "ambiguous", 0, 0.0, None
+            if not numeric_requested.is_integer() or numeric_requested < 0:
+                return "ambiguous", 0, 0.0, None
+            quantity = int(numeric_requested)
         return status, quantity, price, str(order_id) if order_id else None
 
     @staticmethod

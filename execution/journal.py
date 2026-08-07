@@ -60,14 +60,29 @@ class ExecutionJournal:
 
     def get(self, strategy_id: str) -> StrategyExecution | None:
         with self._lock:
-            value = self._read().get(strategy_id)
-        return StrategyExecution.from_dict(value) if value else None
+            records = self._read()
+            if strategy_id not in records:
+                return None
+            value = records[strategy_id]
+        return self._deserialize(value, strategy_id)
 
     def incomplete(self) -> list[StrategyExecution]:
         with self._lock:
-            values = self._read().values()
-            executions = [StrategyExecution.from_dict(value) for value in values]
+            records = self._read()
+            executions = [
+                self._deserialize(value, strategy_id)
+                for strategy_id, value in records.items()
+            ]
         return [item for item in executions if item.state not in TERMINAL_STATES]
+
+    @staticmethod
+    def _deserialize(value, strategy_id: str) -> StrategyExecution:
+        try:
+            return StrategyExecution.from_dict(value)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise JournalCorruptionError(
+                f"Invalid execution journal record: {strategy_id}"
+            ) from exc
 
     @classmethod
     def _safe_payload(cls, value):
@@ -76,10 +91,7 @@ class ExecutionJournal:
             return {
                 str(key): (
                     "[REDACTED]"
-                    if any(
-                        secret in str(key).lower()
-                        for secret in ("token", "secret", "password", "api_key")
-                    )
+                    if cls._is_credential_key(str(key))
                     else cls._safe_payload(item)
                 )
                 for key, item in value.items()
@@ -89,3 +101,15 @@ class ExecutionJournal:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
         return repr(value)
+
+    @staticmethod
+    def _is_credential_key(key: str) -> bool:
+        normalized = key.lower().replace("-", "_")
+        collapsed = normalized.replace("_", "")
+        return (
+            any(
+                secret in normalized
+                for secret in ("token", "secret", "password", "authorization", "cookie")
+            )
+            or "apikey" in collapsed
+        )

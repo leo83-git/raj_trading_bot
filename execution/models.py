@@ -100,18 +100,26 @@ class StrategyExecution:
 
 
 def strategy_fingerprint(
-    underlying: str, strategy: str, legs: list[dict[str, Any]], client_ref: str = ""
+    underlying: str,
+    strategy: str,
+    legs: list[dict[str, Any]],
+    client_ref: str = "",
+    expected_net: str = "ANY",
+    max_net_amount: float | None = None,
 ) -> str:
     """Build a deterministic strategy identity from canonical business inputs."""
     material = {
         "underlying": underlying,
         "strategy": strategy,
         "client_ref": client_ref,
+        "expected_net": expected_net.upper(),
+        "max_net_amount": max_net_amount,
         "legs": [
             {
                 "symbol": leg.get("symbol", ""),
                 "action": str(leg.get("action", "BUY")).upper(),
                 "quantity": int(leg.get("quantity", 0) or 0),
+                "price": float(leg.get("price", 0) or 0),
                 "strike": float(leg.get("strike", 0) or 0),
                 "opt_type": leg.get("opt_type", leg.get("option_type", "")),
             }

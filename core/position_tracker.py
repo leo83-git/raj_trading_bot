@@ -36,6 +36,8 @@ class PositionTracker:
             }
 
         pos = self.positions[symbol]
+        if metadata is not None:
+            pos["metadata"] = {**pos.get("metadata", {}), **metadata}
 
         # Simple averaging for now (can be expanded)
         total_cost = (pos["quantity"] * pos["entry_price"]) + (quantity * entry_price)
@@ -98,7 +100,12 @@ class PositionTracker:
             trailing_stop=float(
                 overrides.get("trailing_stop", metadata.get("trailing_stop", 0)) or 0
             ),
-            profit_ladder_price=float(overrides.get("profit_ladder_price", 0) or 0),
+            profit_ladder_price=float(
+                overrides.get(
+                    "profit_ladder_price", metadata.get("profit_ladder_price", 0)
+                )
+                or 0
+            ),
             emergency_halt=bool(overrides.get("emergency_halt", False)),
             square_off_due=bool(overrides.get("square_off_due", False)),
             expired=bool(overrides.get("expired", False)),
