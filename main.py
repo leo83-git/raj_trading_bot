@@ -5078,15 +5078,13 @@ Total P&L: ₹{total_pnl + open_pnl:.2f}
             log.debug("Skipping trade summary (logged recently)")
 
         # Market-open blackout (first 15 min) and market-close blackout (last 20 min)
-        import datetime
-
         now = datetime.datetime.now().time()
-        market_open_start = datetime.time(9, 15)
-        market_open_end = datetime.time(9, 30)
-        no_new_trades_time = datetime.time(15, 15)  # No new trades after 3:15 PM
+        market_open_start = dt_time(9, 15)
+        market_open_end = dt_time(9, 30)
+        no_new_trades_time = dt_time(15, 15)  # No new trades after 3:15 PM
         # Extend market close to 4:00 PM (16:00) for extended trading hours.
         # Market closes at 3:20 PM (original market close time)
-        market_close_time = datetime.time(15, 20)
+        market_close_time = dt_time(15, 20)
 
         # Reset tried stocks at market open for fresh rotation
         if now >= market_open_start and now <= market_open_end:
