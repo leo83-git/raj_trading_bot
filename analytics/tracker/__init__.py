@@ -130,7 +130,6 @@ class ObservabilityTracker:
             EventType.SCREENING: ("candidate_count", "screening.candidates"),
             EventType.SIGNAL: ("signal_count", "signals.generated"),
             EventType.RISK: ("rejected", "risk.rejections"),
-            EventType.EXECUTION: ("latency_ms", "execution.last_latency_ms"),
             EventType.RECOVERY: ("recovered_count", "recovery.items"),
         }
         if event_type in counter_fields:
@@ -146,6 +145,7 @@ class ObservabilityTracker:
                 ("unrealized", "pnl.unrealized"),
             ),
             EventType.DRAWDOWN: (("percent", "drawdown.percent"),),
+            EventType.EXECUTION: (("latency_ms", "execution.last_latency_ms"),),
             EventType.GREEKS: tuple(
                 (name, f"greeks.{name}") for name in ("delta", "gamma", "theta", "vega")
             ),
@@ -207,9 +207,11 @@ class ObservabilityTracker:
             return {"telemetry_errors": self.telemetry_errors}
 
     def recent_events(self, limit: int = 100) -> list[DomainEvent]:
+        if limit <= 0:
+            return []
         try:
             with self._lock:
-                return list(self._events)[-max(0, limit) :]
+                return list(self._events)[-limit:]
         except Exception:  # Reporting intentionally remains fail-open.
             self.telemetry_errors += 1
             log.debug("P7 recent-event read failed", exc_info=True)

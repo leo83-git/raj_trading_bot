@@ -224,7 +224,9 @@ Live trading remains disabled. Promotion requires these gates in order:
    buffer, blocked trading thread, alert storm, or missing terminal correlation.
 5. **Restricted live:** separate human approval, smallest permitted capital and
    symbols, paper-tested broker credentials, live kill switch, and an operator
-   watching health and reconciliation. P7 itself does not enable live mode.
+   watching health and reconciliation. Approval also requires a completed
+   rollback drill with its evidence recorded before sign-off. P7 itself does not
+   enable live mode.
 
 ### Independent rollback
 
@@ -237,11 +239,12 @@ P7 commit.
 
 ### Emergency flatten
 
-Stop new scheduling first, invoke the tested execution/broker close-all path,
-and reconcile every order and position directly with the broker. Retry only
-after reconciliation proves an order absent; never infer broker state from a
-missing telemetry event. Record unresolved/ambiguous orders and correlation IDs,
-disable further entry, and escalate to manual broker flatten if the automated
-path cannot prove the account flat. Confirm zero broker positions before
-clearing the recovery checkpoint. Alert delivery is advisory and must not delay
-flattening.
+Disable every entry gate and stop new scheduling first. Cancel or await the
+active cycle and all in-flight entry tasks before invoking the tested
+execution/broker close-all path. Reconcile every order and position directly
+with the broker. Retry only after reconciliation proves an order absent; never
+infer broker state from a missing telemetry event. Record unresolved/ambiguous
+orders and correlation IDs, keep further entry disabled, and escalate to manual
+broker flatten if the automated path cannot prove the account flat. Confirm zero
+broker positions before clearing the recovery checkpoint. Alert delivery is
+advisory and must not delay flattening.

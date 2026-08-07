@@ -84,6 +84,22 @@ def test_long_run_event_buffer_is_bounded():
     assert tracker.snapshot()["metrics"]["events.scheduler.cycle"] == 10_000
 
 
+def test_recent_event_non_positive_limit_and_execution_latency_gauge():
+    tracker = ObservabilityTracker()
+    for latency in (12.5, 7.0):
+        tracker.emit(
+            EventType.EXECUTION,
+            source="execution",
+            correlation_id="trade-latency",
+            payload={"latency_ms": latency},
+        )
+    assert tracker.recent_events(0) == []
+    assert tracker.recent_events(-1) == []
+    snapshot = tracker.snapshot()
+    assert snapshot["gauges"]["execution.last_latency_ms"] == 7.0
+    assert "execution.last_latency_ms" not in snapshot["metrics"]
+
+
 def test_alerts_filter_deduplicate_and_allow_repeated_critical():
     sent: list[str] = []
     manager = AlertManager(
@@ -93,7 +109,10 @@ def test_alerts_filter_deduplicate_and_allow_repeated_critical():
             "dedup_window_seconds": 60,
         }
     )
-    sender = lambda message: not sent.append(message)
+
+    def sender(message: str) -> bool:
+        sent.append(message)
+        return True
 
     assert not manager.send_alert(AlertSeverity.INFO, "noise", "ignored", sender=sender)
     assert manager.send_alert(AlertSeverity.WARNING, "feed", "stale", sender=sender)
@@ -101,6 +120,26 @@ def test_alerts_filter_deduplicate_and_allow_repeated_critical():
     assert manager.send_alert(AlertSeverity.CRITICAL, "halt", "flatten", sender=sender)
     assert manager.send_alert(AlertSeverity.CRITICAL, "halt", "flatten", sender=sender)
     assert len(sent) == 3
+
+
+def test_alert_configuration_and_delivery_fail_open(monkeypatch):
+    manager = AlertManager(
+        {
+            "telegram_enabled": True,
+            "minimum_severity": "not-a-severity",
+            "alert_history_maxlen": 2,
+        }
+    )
+    assert manager.minimum_severity is AlertSeverity.INFO
+
+    def broken_transport(*args, **kwargs):
+        raise ValueError("mock formatting failure")
+
+    monkeypatch.setattr("alerts.alert_manager.requests.post", broken_transport)
+    assert manager.send_message("message") is False
+    for index in range(3):
+        manager.alert_history.append({"index": index})
+    assert manager.get_alert_stats()["recent"] == [{"index": 1}, {"index": 2}]
 
 
 def test_health_checks_are_independent_and_non_throwing():
@@ -134,6 +173,13 @@ def test_corrupt_restart_checkpoint_fails_closed_to_none(tmp_path):
     with database.get_session() as session:
         session.add(RuntimeCheckpoint(key="execution", payload_json="not-json"))
     assert database.load_runtime_checkpoint("execution") is None
+
+
+def test_unserializable_restart_checkpoint_is_non_fatal(tmp_path):
+    database = DatabaseManager(database_url=f"sqlite:///{tmp_path / 'p7-recursive.db'}")
+    recursive: list = []
+    recursive.append(recursive)
+    assert database.save_runtime_checkpoint("execution", {"value": recursive}) is None
 
 
 def test_daily_report_contains_pnl_drawdown_greeks_and_recovery():
@@ -186,3 +232,27 @@ def test_main_p7_hook_is_feature_flagged_and_fail_open():
     bot.p7_observability_enabled = True
     bot.observability = BrokenTracker()
     assert bot._observe_p7(EventType.EXECUTION, "execution")
+
+
+def test_trade_alert_runs_before_broken_telemetry_payload():
+    from main import RajTradingBot
+
+    class StrategyTracker:
+        def record_trade(self, *args):
+            return None
+
+    bot = RajTradingBot.__new__(RajTradingBot)
+    bot.strategy_tracker = StrategyTracker()
+    alerts: list[tuple] = []
+
+    def record_alert(*args):
+        alerts.append(args)
+
+    def broken_observer(*args, **kwargs):
+        raise RuntimeError("telemetry failed")
+
+    bot._send_trade_alert = record_alert
+    bot._observe_p7 = broken_observer
+
+    bot._record_trade_outcome("NIFTY", "BUY", 100.0, 1, "25", won=True)
+    assert len(alerts) == 1

@@ -5,6 +5,7 @@
 import datetime as dt
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from enum import IntEnum
 
@@ -36,12 +37,15 @@ class AlertManager:
         )
         self.chat_id = self.config.get("telegram_chat_id", "5510134387")
 
-        self.alert_history = []
+        self.alert_history: deque[dict] = deque(
+            maxlen=max(1, int(self.config.get("alert_history_maxlen", 1_000)))
+        )
         self.alert_counts = {"trade": 0, "error": 0, "risk": 0, "info": 0}
         self.dedup_window_seconds = float(self.config.get("dedup_window_seconds", 300))
-        self.minimum_severity = AlertSeverity[
-            str(self.config.get("minimum_severity", "INFO")).upper()
-        ]
+        severity_name = str(self.config.get("minimum_severity", "INFO")).upper()
+        self.minimum_severity = AlertSeverity.__members__.get(
+            severity_name, AlertSeverity.INFO
+        )
         self._last_alert: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -58,6 +62,9 @@ class AlertManager:
             return response.status_code == 200
         except requests.RequestException as exc:
             log.error("Telegram error: %s", exc)
+            return False
+        except Exception:  # Formatting and mocked transports must remain fail-open.
+            log.exception("Unexpected Telegram delivery error")
             return False
 
     def send_alert(
@@ -227,7 +234,7 @@ class AlertManager:
         return {
             "total_alerts": len(self.alert_history),
             "counts": self.alert_counts,
-            "recent": self.alert_history[-10:],
+            "recent": list(self.alert_history)[-10:],
         }
 
     def set_enabled(self, enabled: bool):

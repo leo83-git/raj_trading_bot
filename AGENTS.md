@@ -8,7 +8,8 @@
 - Ensure requirements.txt dependencies are installed before running tests
 
 ## P7 release safety
-- Keep `observability.p7.enabled: false` until shadow and paper gates pass.
+- Set `observability.p7.enabled: true` only in shadow and paper environments;
+  keep it `false` for live and restricted-live configurations.
 - Observability, alert, health-check, and checkpoint failures are non-fatal; do
   not place trading decisions inside telemetry callbacks.
 - Live trading remains prohibited by default. Restricted-live approval requires

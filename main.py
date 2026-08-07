@@ -606,11 +606,18 @@ class RajTradingBot:
         self._active_scan_future = None
         self._next_scan_due_monotonic = None
         self._next_manage_due_monotonic = None
-        p7_config = self.config.get("observability", {}).get("p7", {})
+        observability_config = self.config.get("observability", {})
+        if not isinstance(observability_config, dict):
+            observability_config = {}
+        p7_config = observability_config.get("p7", {})
+        if not isinstance(p7_config, dict):
+            p7_config = {}
         self.p7_observability_enabled = bool(p7_config.get("enabled", False))
-        self.observability = ObservabilityTracker(
-            max_events=int(p7_config.get("max_events", 2_000))
-        )
+        try:
+            p7_max_events = int(p7_config.get("max_events", 2_000))
+        except (TypeError, ValueError):
+            p7_max_events = 2_000
+        self.observability = ObservabilityTracker(max_events=p7_max_events)
 
         # Disable price cache when watchlist is off before initialization.
         # Respect an explicit ``price_cache.enabled`` flag – if the user has
@@ -2892,13 +2899,25 @@ class RajTradingBot:
             strategy_name = metadata.get("strategy") or metadata.get("symbol")
             # Record trade outcome in strategy tracker
             self.strategy_tracker.record_trade(strategy_name, pnl, won)
+            try:
+                telemetry_pnl = float(pnl)
+            except (TypeError, ValueError):
+                telemetry_pnl = 0.0
+            telemetry_won = bool(won)
+            # Alerts remain independent of best-effort telemetry construction.
+            if abs(telemetry_pnl) > 10:
+                self._send_trade_alert(metadata, telemetry_pnl, telemetry_won)
             correlation_id = str(
                 metadata.get("correlation_id") or new_correlation_id("trade")
             )
             self._observe_p7(
                 EventType.PNL,
                 "trade_outcome",
-                {"symbol": metadata.get("symbol"), "pnl": float(pnl), "won": bool(won)},
+                {
+                    "symbol": metadata.get("symbol"),
+                    "pnl": telemetry_pnl,
+                    "won": telemetry_won,
+                },
                 correlation_id,
             )
             self._observe_p7(
@@ -2910,9 +2929,6 @@ class RajTradingBot:
                 },
                 correlation_id,
             )
-            # Send alert if configured and pnl magnitude is significant
-            if abs(pnl) > 10:
-                self._send_trade_alert(metadata, pnl, won)
         except Exception as e:
             log.error(f"Error recording trade outcome: {e}")
 

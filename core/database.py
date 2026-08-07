@@ -82,7 +82,9 @@ class RuntimeCheckpoint(Base):
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=False), nullable=False, default=datetime.utcnow
+        DateTime(timezone=False),
+        nullable=False,
+        default=lambda: datetime.now(UTC).replace(tzinfo=None),
     )
 
 
@@ -270,11 +272,11 @@ class DatabaseManager:
                     session.add(checkpoint)
                 else:
                     checkpoint.payload_json = encoded
-                    checkpoint.updated_at = datetime.now(UTC)
+                    checkpoint.updated_at = datetime.now(UTC).replace(tzinfo=None)
                 session.flush()
                 session.refresh(checkpoint)
                 return checkpoint
-        except SQLAlchemyError:
+        except (RecursionError, SQLAlchemyError, TypeError, ValueError):
             return None
 
     def load_runtime_checkpoint(self, key: str) -> dict[str, Any] | None:
